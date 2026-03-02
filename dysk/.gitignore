@@ -1,0 +1,15 @@
+.venv/
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+.env
+
+baza_wideo/
+*.mp4
+*.mov
+*.json
+*.raw
+
+.vscode/
