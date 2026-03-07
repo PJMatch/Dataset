@@ -7,13 +7,20 @@ import json
 from datetime import datetime
 
 load_dotenv()
-KATALOG_DOCELOWY = os.getenv("SCIEZKA_ZAPISU", "./dataset_domyslny")
-os.makedirs(KATALOG_DOCELOWY, exist_ok=True)
+
+TARGET_DIR = os.getenv("SCIEZKA_ZAPISU", "./default_dataset")
+os.makedirs(TARGET_DIR, exist_ok=True)
 
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
-def strona_glowna():
+def render_form() -> HTMLResponse:
+    """
+    Renders the main HTML form for video and glosses upload.
+    
+    Returns:
+        HTMLResponse: The HTML content containing the submission form.
+    """
     return """
     <!DOCTYPE html>
     <html>
@@ -26,10 +33,10 @@ def strona_glowna():
             <h2>Dodaj nowe nagranie do datasetu</h2>
             <form action="/upload" method="post" enctype="multipart/form-data">
                 <p>ID osoby:</p>
-                <input type="text" name="id_osoby" required style="font-size: 16px; padding: 5px;"><br><br>
+                <input type="text" name="person_id" required style="font-size: 16px; padding: 5px;"><br><br>
                 
                 <p>Zdanie (tylko glosy, rozdzielone spacją):</p>
-                <input type="text" name="zdanie" required style="font-size: 16px; padding: 5px; width: 100%; max-width: 400px;"><br><br>
+                <input type="text" name="sentence" required style="font-size: 16px; padding: 5px; width: 100%; max-width: 400px;"><br><br>
                 
                 <p>Nagraj wideo:</p>
                 <input type="file" name="video" accept="video/*" capture="camcorder" required><br><br>
@@ -40,29 +47,42 @@ def strona_glowna():
     </html>
     """
 
-@app.post("/upload")
-def wgraj_plik(id_osoby: str = Form(...), zdanie: str = Form(...), video: UploadFile = File(...)):
-    teraz = datetime.now()
-    znacznik_czasu = teraz.strftime("%Y%m%d_%H%M%S")
-    bazowa_nazwa = f"osoba_{id_osoby}_{znacznik_czasu}"
+@app.post("/upload", response_class=HTMLResponse)
+def upload_video(
+    person_id: str = Form(...), 
+    sentence: str = Form(...), 
+    video: UploadFile = File(...)
+) -> HTMLResponse:
+    """
+    Handles the uploaded video file, generates metadata, and saves both to the target directory.
     
-    # zapis wideo
-    rozszerzenie = video.filename.split(".")[-1] if "." in video.filename else "mp4"
-    nazwa_pliku_wideo = f"{bazowa_nazwa}.{rozszerzenie}"
+    Args:
+        person_id (str): The unique identifier of the person signing.
+        sentence (str): The glosses representing the signed sentence, separated by spaces.
+        video (UploadFile): The uploaded video file object.
+        
+    Returns:
+        HTMLResponse: A success message with a link to submit another video.
+    """
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    base_filename = f"person_{person_id}_{timestamp}"
     
-    with open(os.path.join(KATALOG_DOCELOWY, nazwa_pliku_wideo), "wb") as buffer:
+    extension = video.filename.split(".")[-1] if "." in video.filename else "mp4"
+    video_filename = f"{base_filename}.{extension}"
+    
+    with open(os.path.join(TARGET_DIR, video_filename), "wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
         
-    # zapis json
-    lista_glosow = zdanie.lower().split()
-    dane_json = {
-        "id_osoby": id_osoby,
-        "data_nagrania": teraz.isoformat(),
-        "glosy": lista_glosow,
+    gloses_list = sentence.lower().split()
+    json_data = {
+        "person_id": person_id,
+        "recording_date": now.isoformat(),
+        "gloses": gloses_list,
     }
     
-    with open(os.path.join(KATALOG_DOCELOWY, f"{bazowa_nazwa}.json"), "w", encoding="utf-8") as f:
-        json.dump(dane_json, f, indent=4, ensure_ascii=False)
+    with open(os.path.join(TARGET_DIR, f"{base_filename}.json"), "w", encoding="utf-8") as f:
+        json.dump(json_data, f, indent=4, ensure_ascii=False)
 
     return HTMLResponse(content=f"""
     <!DOCTYPE html>
