@@ -123,7 +123,6 @@ def render_form(person_id: Optional[str] = "", next_sentence_id: Optional[str] =
                 <br>
                 <p><strong>Nagraj wideo:</strong></p>
                 <input type="file" name="video" accept="video/*" capture="camcorder" required><br><br>
-                
                 <button type="submit" style="font-size: 18px; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; width: 100%;">Zapisz Nagranie</button>
             </form>
 
