@@ -28,6 +28,8 @@ SIGN_CORRECTIONS = {
     "dużo": "duży",     # "much/many" maps to "big"
     "dobrze": "dobry",  # "well" maps to "good"
     "szybko": "szybki", # "fast (adv)" maps to "fast (adj)"
+    "zmęczyć": "zmęczony",
+    "chora": "chory"
 }
 
 def generate_excel_report(input_file_path, output_file_name):
