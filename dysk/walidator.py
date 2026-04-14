@@ -1,10 +1,22 @@
-import os
+"""
+Dataset validation and maintenance script for the sign language translator.
+
+This script performs a series of automated checks and corrections on the recorded dataset:
+1. Losslessly removes audio tracks from all video files.
+2. Cross-references recorded sentences with the master Excel file.
+3. Recreates missing JSON metadata files based on video filenames.
+4. Corrects sentence IDs in JSON files if they differ from the Excel database.
+5. Updates the JSON structure to include 'glosses' (sign sequence) and a 
+   'recorded_correctly' flag based on a provided errors list.
+"""
+
 import glob
 import json
-import sys
+import os
 import subprocess
+import sys
+from typing import Any, Dict, List, Set
 import pandas as pd
-from typing import Dict, List, Any
 
 try:
     import imageio_ffmpeg
@@ -13,18 +25,20 @@ except ImportError:
     print("Zainstaluj ją wpisując w terminalu: pip install imageio-ffmpeg")
     sys.exit(1)
 
-VIDEO_FOLDER = "baza_wideo"
-EXCEL_FILE = "prepared_sentences.xlsx"
+VIDEO_FOLDER: str = "baza_wideo"
+EXCEL_FILE: str = "prepared_sentences.xlsx"
+ERRORS_FILE: str = "Błędy.txt"
+
 
 def ask_yes_no(question: str) -> bool:
     """
-    Prompts the user with a yes/no question and returns a boolean.
+    Prompts the user with a yes/no question via standard input.
 
     Args:
-        question (str): The question to present to the user.
+        question (str): The question to display to the user.
 
     Returns:
-        bool: True if the user answers 'y', False if 'n'.
+        bool: True if the user answers 'y', False if the user answers 'n'.
     """
     while True:
         ans = input(f"{question} (y/n): ").strip().lower()
@@ -33,22 +47,26 @@ def ask_yes_no(question: str) -> bool:
         elif ans == 'n':
             return False
 
+
 def remove_audio_from_videos(folder_path: str) -> None:
     """
-    Losslessly removes the audio track from all video files in the specified directory.
+    Losslessly removes the audio track from all .mp4 and .mov files in a directory.
+
+    Utilizes the FFmpeg executable provided by imageio_ffmpeg.
 
     Args:
-        folder_path (str): Path to the folder containing video files.
+        folder_path (str): Path to the directory containing video files.
     """
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    videos = glob.glob(os.path.join(folder_path, "*.mp4")) + glob.glob(os.path.join(folder_path, "*.mov"))
+    ffmpeg_exe: str = imageio_ffmpeg.get_ffmpeg_exe()
+    videos: List[str] = glob.glob(os.path.join(folder_path, "*.mp4")) + \
+                        glob.glob(os.path.join(folder_path, "*.mov"))
     
     if not videos:
         return
         
-    print(f"Znaleziono {len(videos)} plików wideo. Trwa usuwanie dźwięku")
+    print(f"Znaleziono {len(videos)} plików wideo. Trwa usuwanie dźwięku...")
     
-    counter = 0
+    counter: int = 0
     for video in videos:
         temp_file = video + ".temp.mp4"
         
@@ -69,10 +87,10 @@ def remove_audio_from_videos(folder_path: str) -> None:
                 
     print(f"Pomyślnie usunięto dźwięk z {counter} nagrań.")
 
+
 def main() -> None:
     """
-    Main execution function: strips audio, validates datasets, corrects IDs based 
-    on Excel data, and appends glosses to JSON metadata.
+    Main execution pipeline for dataset validation and correction.
     """
     if not os.path.exists(VIDEO_FOLDER):
         print(f"BŁĄD: Nie znaleziono folderu z nagraniami: '{VIDEO_FOLDER}'.")
@@ -82,16 +100,27 @@ def main() -> None:
         print(f"BŁĄD: Nie znaleziono pliku: '{EXCEL_FILE}'.")
         sys.exit(1)
 
+    errors_set: Set[str] = set()
+    if os.path.exists(ERRORS_FILE):
+        with open(ERRORS_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                clean_line = line.strip()
+                if clean_line:
+                    errors_set.add(clean_line)
+    else:
+        print(f"\nUWAGA: Nie znaleziono pliku '{ERRORS_FILE}'. Wszystkie nagrania zostaną oznaczone jako poprawne.")
+
     print("\n--- Oczyszczanie nagrań z dźwięku ---")
     remove_audio_from_videos(VIDEO_FOLDER)
 
     try:
-        df = pd.read_excel(EXCEL_FILE)
+        df: pd.DataFrame = pd.read_excel(EXCEL_FILE)
         if len(df.columns) < 3:
             print("BŁĄD: Plik Excel musi mieć co najmniej 3 kolumny (ID, Zdanie, Kolejność znaków)!")
             sys.exit(1)
                 
         sentences_db: Dict[str, Dict[str, Any]] = {}
+        id_to_sentence: Dict[str, str] = {}
         
         for idx in range(len(df)):
             row = df.iloc[idx]
@@ -99,7 +128,8 @@ def main() -> None:
             if pd.isna(row.iloc[1]):
                 continue
                 
-            sentence = str(row.iloc[1]).strip().lower()
+            original_sentence = str(row.iloc[1]).strip()
+            sentence_lower = original_sentence.lower()
             
             try:
                 row_id = f"{int(row.iloc[0]):02d}"
@@ -107,23 +137,70 @@ def main() -> None:
                 row_id = str(row.iloc[0]).strip()
                 
             glosses = row.iloc[2] if pd.notna(row.iloc[2]) else None
-            sentences_db[sentence] = {'id': row_id, 'glosses': glosses}
+            sentences_db[sentence_lower] = {'id': row_id, 'glosses': glosses}
+            id_to_sentence[row_id] = original_sentence
+            
+            id_to_sentence[str(row.iloc[0]).strip()] = original_sentence
             
     except Exception as e:
         print(f"BŁĄD podczas czytania pliku Excel: {e}")
         sys.exit(1)
 
-    print("\n--- Sprawdzanie obecności plików .json ---")
-    videos = glob.glob(os.path.join(VIDEO_FOLDER, "*.mp4")) + glob.glob(os.path.join(VIDEO_FOLDER, "*.mov"))
+    print("\n--- Sprawdzanie i odtwarzanie plików .json ---")
+    videos = glob.glob(os.path.join(VIDEO_FOLDER, "*.mp4")) + \
+             glob.glob(os.path.join(VIDEO_FOLDER, "*.mov"))
+    recreated_count: int = 0
     
     for video in videos:
         base_name = os.path.splitext(video)[0]
         json_file = f"{base_name}.json"
+        
         if not os.path.exists(json_file):
-            print(f"BŁĄD: Brak pliku .json dla nagrania: '{os.path.basename(video)}'")
-            sys.exit(1)
-    
-    print("Każde nagranie ma swój plik .json.")
+            filename_only = os.path.basename(base_name)
+            print(f"Brak pliku .json dla wideo '{filename_only}'. Próbuję odtworzyć...")
+            
+            file_parts = filename_only.split('_')
+            
+            if len(file_parts) >= 2:
+                p_id = file_parts[0]
+                s_id = file_parts[1]
+                s_id_padded = f"{int(s_id):02d}" if s_id.isdigit() else s_id
+                
+                if s_id_padded in id_to_sentence:
+                    sentence_text = id_to_sentence[s_id_padded]
+                elif s_id in id_to_sentence:
+                    sentence_text = id_to_sentence[s_id]
+                else:
+                    print(f" -> BŁĄD: W Excelu nie ma zdania o ID '{s_id}'. Nie mogę odtworzyć JSON-a. Przerwano!")
+                    sys.exit(1)
+                
+                rec_date = ""
+                if len(file_parts) >= 4:
+                    d_str = file_parts[2]
+                    t_str = file_parts[3]
+                    if len(d_str) == 8 and len(t_str) >= 6:
+                        rec_date = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:8]}T{t_str[:2]}:{t_str[2:4]}:{t_str[4:6]}.000000"
+                        
+                temp_data = {
+                    "person_id": p_id,
+                    "sentence_id": s_id,
+                    "recording_date": rec_date,
+                    "sentence": sentence_text
+                }
+                
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(temp_data, f, indent=4, ensure_ascii=False)
+                
+                print(f" -> Pomyślnie odtworzono: {filename_only}.json")
+                recreated_count += 1
+            else:
+                print(f" -> BŁĄD: Nazwa '{filename_only}' ma nietypowy format. Nie mogę wyciągnąć danych.")
+                sys.exit(1)
+                
+    if recreated_count == 0:
+        print("Wszystkie nagrania mają swoje pliki .json.")
+    else:
+        print(f"Odtworzono łącznie {recreated_count} zgubionych plików .json.")
 
     print("\n--- Walidacja ID zdań ---")
     json_files = glob.glob(os.path.join(VIDEO_FOLDER, "*.json"))
@@ -187,7 +264,8 @@ def main() -> None:
     else:
         print("Wszystkie ID zgadzają się z Excelem.")
 
-    print("\n--- Aktualizacja glosów ---")
+    print("\n--- Aktualizacja struktury JSON (Glosses & Poprawność) ---")
+    
     json_files = glob.glob(os.path.join(VIDEO_FOLDER, "*.json"))
     missing_glosses: List[str] = []
     
@@ -201,14 +279,16 @@ def main() -> None:
             missing_glosses.append(os.path.basename(json_path))
             
     if missing_glosses:
-        print(f"UWAGA: W pliku Excel brakuje wpisów w kolumnie 'kolejność znaków' dla następujących nagrań:")
-        for b in missing_glosses:
+        print("UWAGA: W pliku Excel brakuje wpisów w kolumnie 'kolejność znaków' dla następujących nagrań:")
+        for b in missing_glosses[:5]:  
             print(f" - {b}")
+        if len(missing_glosses) > 5:
+            print(f" ...i {len(missing_glosses) - 5} innych.")
             
-        if not ask_yes_no("Czy pominąć brakujące i dopisać glosy tylko do pozostałych plików?"):
+        if not ask_yes_no("Czy pominąć brakujące i kontynuować przebudowę plików?"):
             sys.exit(1)
             
-    counter = 0
+    counter: int = 0
     for json_path in json_files:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -216,16 +296,40 @@ def main() -> None:
         json_sentence = data.get("sentence", "").strip().lower()
         raw_glosses = sentences_db[json_sentence]['glosses']
         
+        gloss_list = data.get("glosses", data.get("glosy", [])) 
         if raw_glosses:
             separator = ',' if ',' in str(raw_glosses) else ' '
             gloss_list = [g.strip() for g in str(raw_glosses).split(separator) if g.strip()]
-            
-            data['glosy'] = gloss_list
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            counter += 1
 
-    print(f"\nDopisywanie glosów zakończone.")
+        p_id_raw = data.get('person_id', '')
+        s_id_raw = data.get('sentence_id', '')
+        
+        try:
+            error_key_int = f"{int(p_id_raw)}_{int(s_id_raw)}"
+        except ValueError:
+            error_key_int = None
+            
+        error_key_raw = f"{p_id_raw}_{s_id_raw}"
+
+        is_correct: bool = True
+        if (error_key_int and error_key_int in errors_set) or (error_key_raw in errors_set):
+            is_correct = False
+
+        new_data = {
+            "recorded_correctly": is_correct,
+            "person_id": p_id_raw,
+            "sentence_id": s_id_raw,
+            "recording_date": data.get("recording_date", ""),
+            "sentence": data.get("sentence", ""),
+            "glosses": gloss_list
+        }
+
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(new_data, f, indent=4, ensure_ascii=False)
+        counter += 1
+
+    print(f"\nGotowe! Zaktualizowano strukturę JSON dla {counter} plików.")
+
 
 if __name__ == "__main__":
     main()
