@@ -1,0 +1,35 @@
+class AnnotationData:
+    def __init__(self, ssh_manager, json_remote_path):
+        self.ssh_manager = ssh_manager
+        self.json_remote_path = json_remote_path
+
+        self.data = self.ssh_manager.read_json_memory(json_remote_path)
+
+        raw_glosses = self.data.get("glosses", [])
+        self.original_glosses = []
+
+        for item in raw_glosses:
+            if isinstance(item, list):
+                self.original_glosses.append(str(item[0]))
+            else:
+                self.original_glosses.append(str(item))
+
+        self.recorded_glosses = []
+        self.timestamps = []
+
+    def add_timestamp(self, selected_gloss, frame_idx):
+        if not self.is_complete():
+            self.recorded_glosses.append(selected_gloss)
+            self.timestamps.append(frame_idx)
+
+    def is_complete(self):
+        return len(self.timestamps) >= len(self.original_glosses)
+
+    def finalize_and_save(self, reordered_glosses):
+        sorted_timestamps = sorted(self.timestamps)
+
+        self.data["glosses"] = [
+            [g, t] for g, t in zip(reordered_glosses, sorted_timestamps)
+        ]
+
+        self.ssh_manager.save_json_memory(self.json_remote_path, self.data)
