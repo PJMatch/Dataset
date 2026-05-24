@@ -19,9 +19,9 @@ from typing import Any, Dict, List, Set
 import pandas as pd
 import imageio_ffmpeg
 
-VIDEO_FOLDER = "/pjm/baza_wideo"
-EXCEL_FILE = "/home/micliber/test/Dataset/Sentences/prepared_sentences_m.xlsx"
-ERRORS_FILE = "Błędy.txt"
+VIDEO_FOLDER = "enter the path to the file"
+EXCEL_FILE = "enter the path to the file"
+ERRORS_FILE = "enter the path to the file"
 
 def ask_yes_no(question: str) -> bool:
     """
