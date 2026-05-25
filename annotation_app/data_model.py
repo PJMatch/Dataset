@@ -22,6 +22,12 @@ class AnnotationData:
             self.recorded_glosses.append(selected_gloss)
             self.timestamps.append(frame_idx)
 
+    def delete_timestamp(self, index):
+        """Deletes a recorded gloss and its timestamp at the given index."""
+        if 0 <= index < len(self.timestamps):
+            self.recorded_glosses.pop(index)
+            self.timestamps.pop(index)
+
     def is_complete(self):
         return len(self.timestamps) >= len(self.original_glosses)
 
