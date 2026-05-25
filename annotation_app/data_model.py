@@ -1,3 +1,7 @@
+import json
+import os
+
+
 class AnnotationData:
     def __init__(self, ssh_manager, json_remote_path):
         self.ssh_manager = ssh_manager
@@ -14,6 +18,9 @@ class AnnotationData:
             else:
                 self.original_glosses.append(str(item))
 
+        if not self.original_glosses or self.original_glosses[-1] != "EoR":
+            self.original_glosses.append("EoR")
+
         self.recorded_glosses = []
         self.timestamps = []
 
@@ -23,7 +30,6 @@ class AnnotationData:
             self.timestamps.append(frame_idx)
 
     def delete_timestamp(self, index):
-        """Deletes a recorded gloss and its timestamp at the given index."""
         if 0 <= index < len(self.timestamps):
             self.recorded_glosses.pop(index)
             self.timestamps.pop(index)

@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
 
         self.dataset_cache = {}
         self.current_dataset = None
+        self.last_query_key = None
 
         self.init_ui()
 
@@ -88,35 +89,42 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
-        # top bar
         top_bar = QHBoxLayout()
-        self.load_btn = QPushButton("Browse Remote Files")
-        self.load_btn.setStyleSheet(
-            "background-color: #444; color: white; padding: 5px;"
-        )
-        self.load_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.load_btn.clicked.connect(self.browse_remote)
-        top_bar.addWidget(self.load_btn)
 
-        self.status_label = QLabel("Connected. Please browse for a video.")
+        self.browse_btn = QPushButton("1. Fetch New Range")
+        self.browse_btn.setStyleSheet(
+            "background-color: #444; color: white; padding: 5px; font-weight: bold;"
+        )
+        self.browse_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.browse_btn.clicked.connect(self.browse_remote)
+        top_bar.addWidget(self.browse_btn)
+
+        self.cached_list_btn = QPushButton("2. Show Cached List")
+        self.cached_list_btn.setStyleSheet(
+            "background-color: #5bc0de; color: black; padding: 5px; font-weight: bold;"
+        )
+        self.cached_list_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cached_list_btn.setEnabled(False)
+        self.cached_list_btn.clicked.connect(self.show_cached_list)
+        top_bar.addWidget(self.cached_list_btn)
+
+        self.status_label = QLabel("Connected. Please fetch a new range.")
         top_bar.addWidget(self.status_label)
+        top_bar.addStretch()
         layout.addLayout(top_bar)
 
-        # video player
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black;")
         self.video_label.setMinimumSize(640, 360)
         layout.addWidget(self.video_label, stretch=1)
 
-        # slider
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.setEnabled(False)
         layout.addWidget(self.slider)
 
-        # combo box for current gloss
         gloss_layout = QHBoxLayout()
         self.gloss_label = QLabel("Current Gloss:")
         self.gloss_label.setStyleSheet(
@@ -133,9 +141,18 @@ class MainWindow(QMainWindow):
         gloss_layout.addWidget(self.gloss_combo)
 
         gloss_layout.addStretch()
+
+        self.skip_btn = QPushButton("⏭ Skip Video")
+        self.skip_btn.setStyleSheet(
+            "background-color: #f0ad4e; color: black; font-weight: bold; padding: 5px;"
+        )
+        self.skip_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.skip_btn.setEnabled(False)
+        self.skip_btn.clicked.connect(self.skip_video)
+        gloss_layout.addWidget(self.skip_btn)
+
         layout.addLayout(gloss_layout)
 
-        # history list and delete button
         history_layout = QVBoxLayout()
         history_layout.addWidget(
             QLabel("Recorded Timestamps (Click to select, press Delete to remove):")
@@ -169,6 +186,22 @@ class MainWindow(QMainWindow):
                 print(f"Failed to delete temp video: {e}")
             self.current_temp_video = None
 
+    def reset_annotation_ui(self):
+        """Clears the screen before loading a new video."""
+        self.cleanup_temp_video()
+        self.annotation_data = None
+        self.video_label.clear()
+        self.slider.setEnabled(False)
+        self.gloss_combo.clear()
+        self.gloss_combo.setEnabled(False)
+        self.skip_btn.setEnabled(False)
+        self.history_list.clear()
+
+    def set_buttons_enabled(self, state):
+        self.browse_btn.setEnabled(state)
+        if self.last_query_key in self.dataset_cache:
+            self.cached_list_btn.setEnabled(state)
+
     def browse_remote(self):
         range_dialog = RangeInputDialog(self)
         if range_dialog.exec() == QDialog.DialogCode.Accepted:
@@ -177,13 +210,14 @@ class MainWindow(QMainWindow):
             return
 
         self.last_query_key = (min_id, max_id)
+
         if self.last_query_key in self.dataset_cache:
             self.on_fetch_success(
                 self.dataset_cache[self.last_query_key], from_cache=True
             )
             return
 
-        self.load_btn.setEnabled(False)
+        self.set_buttons_enabled(False)
         self.status_label.setText(
             "Fetching file list from server (this may take a moment)..."
         )
@@ -193,11 +227,17 @@ class MainWindow(QMainWindow):
         self.fetch_worker.error.connect(self.on_fetch_error)
         self.fetch_worker.start()
 
+    def show_cached_list(self):
+        if self.last_query_key in self.dataset_cache:
+            self.on_fetch_success(
+                self.dataset_cache[self.last_query_key], from_cache=True
+            )
+
     def on_fetch_success(self, datasets, from_cache=False):
         if not from_cache:
             self.dataset_cache[self.last_query_key] = datasets
 
-        self.load_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         self.status_label.setText("Select a video from the list.")
 
         browser = FileBrowserDialog(datasets, self)
@@ -208,15 +248,14 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Browse cancelled.")
 
     def on_fetch_error(self, err_msg):
-        self.load_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         QMessageBox.critical(self, "Error", f"Failed to list datasets:\n{err_msg}")
         self.status_label.setText("Error fetching files.")
 
     def load_dataset(self, dataset):
-        self.load_btn.setEnabled(False)
+        self.set_buttons_enabled(False)
+        self.reset_annotation_ui()
         self.status_label.setText(f"Downloading {dataset['name']} to temp memory...")
-
-        self.cleanup_temp_video()
 
         self.download_worker = DownloadWorker(self.ssh_manager, dataset)
         self.download_worker.finished.connect(self.on_download_success)
@@ -224,7 +263,9 @@ class MainWindow(QMainWindow):
         self.download_worker.start()
 
     def on_download_success(self, temp_video, annotation_data):
-        self.load_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
+        self.skip_btn.setEnabled(True)
+
         self.current_temp_video = temp_video
         self.video_backend.load(self.current_temp_video)
         self.annotation_data = annotation_data
@@ -242,9 +283,29 @@ class MainWindow(QMainWindow):
         self.show_frame(0)
 
     def on_download_error(self, err_msg):
-        self.load_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         QMessageBox.critical(self, "Error", f"Failed to load dataset:\n{err_msg}")
         self.status_label.setText("Error loading dataset.")
+
+    def load_next_dataset(self):
+        """Finds and loads the next unannotated dataset from the cached list."""
+        next_dataset = None
+        if self.last_query_key and self.last_query_key in self.dataset_cache:
+            for ds in self.dataset_cache[self.last_query_key]:
+                if not ds["annotated"]:
+                    next_dataset = ds
+                    break
+
+        if next_dataset:
+            self.current_dataset = next_dataset
+            self.load_dataset(next_dataset)
+        else:
+            self.status_label.setText(
+                "All videos in this range are annotated! Please fetch a new range."
+            )
+            QMessageBox.information(
+                self, "Finished", "All videos in the current list are complete!"
+            )
 
     def show_frame(self, frame_idx):
         frame = self.video_backend.get_frame(frame_idx)
@@ -265,7 +326,6 @@ class MainWindow(QMainWindow):
             self.is_updating_slider = True
             self.slider.setValue(frame_idx)
             self.is_updating_slider = False
-
             self.status_label.setText(
                 f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}"
             )
@@ -292,15 +352,12 @@ class MainWindow(QMainWindow):
             self.gloss_combo.setCurrentIndex(next_index)
 
         self.update_ui_state()
-
         if self.annotation_data.is_complete():
             self.finish_annotation()
 
     def delete_selected_timestamp(self):
-        """Deletes the highlighted item from the history list."""
         if not self.annotation_data:
             return
-
         current_row = self.history_list.currentRow()
         if current_row >= 0:
             deleted_gloss = self.annotation_data.recorded_glosses[current_row]
@@ -332,6 +389,19 @@ class MainWindow(QMainWindow):
         if self.history_list.count() > 0:
             self.history_list.setCurrentRow(self.history_list.count() - 1)
 
+    def skip_video(self):
+        if not self.current_dataset or not self.last_query_key:
+            return
+
+        if self.last_query_key in self.dataset_cache:
+            current_list = self.dataset_cache[self.last_query_key]
+            if self.current_dataset in current_list:
+                current_list.remove(self.current_dataset)
+                current_list.append(self.current_dataset)
+
+        self.reset_annotation_ui()
+        self.load_next_dataset()
+
     def finish_annotation(self):
         dialog = ReorderDialog(
             self.annotation_data.recorded_glosses,
@@ -344,24 +414,14 @@ class MainWindow(QMainWindow):
             reordered = dialog.get_reordered_glosses()
             try:
                 self.annotation_data.finalize_and_save(reordered)
-                QMessageBox.information(
-                    self, "Success", "JSON updated on remote server!"
-                )
-
                 if self.current_dataset:
                     self.current_dataset["annotated"] = True
 
+                self.reset_annotation_ui()
+                self.load_next_dataset()
+
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", str(e))
-
-            self.cleanup_temp_video()
-            self.annotation_data = None
-            self.video_label.clear()
-            self.slider.setEnabled(False)
-            self.gloss_combo.clear()
-            self.gloss_combo.setEnabled(False)
-            self.history_list.clear()
-            self.status_label.setText("Please browse for a new video.")
 
     def keyPressEvent(self, event):
         if not self.annotation_data:

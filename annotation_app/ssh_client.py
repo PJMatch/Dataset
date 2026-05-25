@@ -25,34 +25,46 @@ class SSHManager:
         mp4_files = [f for f in files if f.endswith(".mp4")]
 
         for mp4 in mp4_files:
-            if min_id is not None or max_id is not None:
-                try:
-                    parts = mp4.split("_")
-                    if len(parts) >= 2:
-                        sentence_id = int(parts[1])
-                        if min_id is not None and sentence_id < min_id:
-                            continue
-                        if max_id is not None and sentence_id > max_id:
-                            continue
-                    else:
-                        continue
-                except ValueError:
-                    continue  # skip if the ID part is not a number
+            try:
+                parts = mp4.split("_")
+                if len(parts) >= 2:
+                    person_id = int(parts[0])
+                    sentence_id = int(parts[1])
+                else:
+                    continue
+            except ValueError:
+                continue
+
+            if min_id is not None and sentence_id < min_id:
+                continue
+            if max_id is not None and sentence_id > max_id:
+                continue
 
             base_name = mp4[:-4]
             json_name = base_name + ".json"
 
             if json_name in files:
                 is_annotated = False
+                skip_file = False
                 json_path = f"{remote_dir}/{json_name}"
 
                 try:
                     with self.sftp.open(json_path, "r") as f:
                         data = json.load(f)
-                        if data.get("glosses") and isinstance(data["glosses"][0], list):
+
+                        if data.get("recorded_correctly") is False:
+                            skip_file = True
+                            print(f"Skipping file {base_name}")
+                        elif data.get("glosses") and isinstance(
+                            data["glosses"][0], list
+                        ):
                             is_annotated = True
                 except Exception:
+                    print("Flag recorded_correctly not found")
                     pass
+
+                if skip_file:
+                    continue
 
                 datasets.append(
                     {
@@ -60,10 +72,12 @@ class SSHManager:
                         "annotated": is_annotated,
                         "mp4_path": f"{remote_dir}/{mp4}",
                         "json_path": json_path,
+                        "sentence_id": sentence_id,
+                        "person_id": person_id,
                     }
                 )
 
-        datasets.sort(key=lambda x: (x["annotated"], x["name"]))
+        datasets.sort(key=lambda x: (x["annotated"], x["sentence_id"], x["person_id"]))
         return datasets
 
     def read_json_memory(self, remote_path):
@@ -84,4 +98,6 @@ class SSHManager:
     def disconnect(self):
         if self.sftp:
             self.sftp.close()
+            print("SFTP session closed.")
         self.ssh.close()
+        print("SSH connection terminated safely.")
