@@ -6,8 +6,10 @@ This script performs a series of automated checks and corrections on the recorde
 2. Cross-references recorded sentences with the master Excel file.
 3. Recreates missing JSON metadata files based on video filenames.
 4. Corrects sentence IDs in JSON files if they differ from the Excel database.
-5. Updates the JSON structure to include 'glosses'
-6. PROTECTS annotated JSON files from being overwritten.
+5. Updates the JSON structure to include 'glosses' (sign sequence) and a 
+   'recorded_correctly' flag based on a provided errors list.
+6. OVERRIDES glosses if they are defined in pop_glosy.txt.
+7. PROTECTS annotated JSON files from being overwritten.
 """
 
 import glob
@@ -17,11 +19,18 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Set
 import pandas as pd
-import imageio_ffmpeg
 
-VIDEO_FOLDER = "enter the path to the file"
-EXCEL_FILE = "enter the path to the file"
-ERRORS_FILE = "enter the path to the file"
+try:
+    import imageio_ffmpeg
+except ImportError:
+    print("BŁĄD: Brakuje biblioteki 'imageio-ffmpeg'.")
+    print("Zainstaluj ją wpisując w terminalu: pip install imageio-ffmpeg")
+    sys.exit(1)
+
+VIDEO_FOLDER = "/pjm/baza_wideo"
+EXCEL_FILE = "/home/micliber/test/Dataset/Sentences/prepared_sentences_m.xlsx"
+ERRORS_FILE = "Błędy.txt"
+POP_GLOSY_FILE = "pop_glosy.txt"
 
 def ask_yes_no(question: str) -> bool:
     """
@@ -85,8 +94,8 @@ def remove_audio_from_videos(folder_path: str) -> Set[str]:
 
 def is_annotated(json_data: dict) -> bool:
     """
-    Checks if a JSON file has already been annotated.
-    It does this by checking if the 'glosses' list contains nested lists.
+    Sprawdza, czy plik JSON został już zaadnotowany.
+    Weryfikuje to na podstawie struktury - czy lista 'glosses' zawiera kolejne listy.
     """
     glosses = json_data.get("glosses", [])
     if isinstance(glosses, list) and len(glosses) > 0:
@@ -119,17 +128,12 @@ def main() -> None:
         except PermissionError:
             global_skipped_files.add(os.path.basename(json_path))
         except json.JSONDecodeError:
-            print(f"OSTRZEŻENIE: Nie można odczytać uszkodzonego pliku {os.path.basename(json_path)}")
+            pass
 
     if protected_files:
         print(f"UWAGA: Znaleziono {len(protected_files)} plików .json, które mają już adnotacje.")
         print("Te pliki zostaną POMINIĘTE podczas aktualizacji struktury, aby chronić Twoją pracę.")
         if not ask_yes_no("Czy liczba zabezpieczonych plików się zgadza i chcesz kontynuować?"):
-            print("Zatrzymano działanie skryptu.")
-            sys.exit(0)
-    else:
-        print("Nie znaleziono żadnych zaadnotowanych plików .json. Żadne pliki nie będą chronione przed nadpisaniem.")
-        if not ask_yes_no("Czy na pewno chcesz kontynuować?"):
             print("Zatrzymano działanie skryptu.")
             sys.exit(0)
 
@@ -141,7 +145,19 @@ def main() -> None:
                 if clean_line:
                     errors_set.add(clean_line)
     else:
-        print(f"\nUWAGA: Nie znaleziono pliku '{ERRORS_FILE}'. Wszystkie nagrania zostaną oznaczone jako poprawne.")
+        print(f"\nUWAGA: Nie znaleziono pliku '{ERRORS_FILE}'.")
+
+    pop_glosy_db = {}
+    if os.path.exists(POP_GLOSY_FILE):
+        with open(POP_GLOSY_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                if '_"' in line:
+                    key, val = line.split('_"', 1)
+                    val = val.rstrip('"')
+                    pop_glosy_db[key] = val
+        print(f"\n-> Wczytano {len(pop_glosy_db)} dedykowanych nadpisań glosów z '{POP_GLOSY_FILE}'.")
 
     print("\n--- Oczyszczanie nagrań z dźwięku ---")
     skipped_audio = remove_audio_from_videos(VIDEO_FOLDER)
@@ -200,7 +216,6 @@ def main() -> None:
                 elif s_id in id_to_sentence:
                     sentence_text = id_to_sentence[s_id]
                 else:
-                    print(f" -> BŁĄD: W Excelu nie ma zdania o ID '{s_id}'. Nie odtworzono JSON-a.")
                     continue
                 
                 rec_date = ""
@@ -224,7 +239,7 @@ def main() -> None:
                 except PermissionError:
                     global_skipped_files.add(f"{filename_only}.json")
             else:
-                pass # Błędny format nazwy - ignorujemy
+                pass
                 
     if recreated_count == 0:
         print("Wszystkie nagrania mają swoje pliki .json (lub pominięto z powodu uprawnień).")
@@ -263,7 +278,7 @@ def main() -> None:
             old_json_path = correction['json_path']
             
             if os.path.basename(old_json_path) in protected_files:
-                print(f"\nUWAGA: Plik '{os.path.basename(old_json_path)}' ma niezgodne ID, ale jest chroniony (zaadnotowany). Pomijam korektę ID.")
+                print(f"\nUWAGA: Plik '{os.path.basename(old_json_path)}' ma niezgodne ID, ale jest chroniony. Pomijam.")
                 continue
 
             base_name = os.path.splitext(old_json_path)[0]
@@ -272,7 +287,6 @@ def main() -> None:
                 old_video_path = f"{base_name}.mov"
             
             print(f"\nNiezgodność ID w pliku: '{os.path.basename(old_json_path)}'")
-            print(f"W pliku .json jest ID: '{correction['wrong_id']}', a w Excelu to zdanie ma ID: '{correction['correct_id']}'.")
             
             if ask_yes_no("Czy poprawić to na ID zgodne z Excelem?"):
                 correction['data']['sentence_id'] = correction['correct_id']
@@ -297,45 +311,16 @@ def main() -> None:
                     os.remove(old_json_path)
                     print("-> Poprawiono pomyślnie.")
                 except PermissionError:
-                    print("-> BŁĄD: Brak uprawnień do zmiany nazwy/edycji tych plików. Pomijam.")
                     global_skipped_files.add(os.path.basename(old_json_path))
                     if os.path.exists(old_video_path):
                         global_skipped_files.add(os.path.basename(old_video_path))
-    else:
-        print("Wszystkie dostepne ID zgadzają się z Excelem.")
 
     print("\n--- Aktualizacja struktury JSON (Glosses & Poprawność) ---")
     
-    json_files = glob.glob(os.path.join(VIDEO_FOLDER, "*.json"))
-    missing_glosses: List[str] = []
-    
-    for json_path in json_files:
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except PermissionError:
-            global_skipped_files.add(os.path.basename(json_path))
-            continue
-
-        json_sentence = data.get("sentence", "").strip().lower()
-        if json_sentence in sentences_db:
-            glosses = sentences_db[json_sentence]['glosses']
-            if not glosses:
-                missing_glosses.append(os.path.basename(json_path))
-            
-    if missing_glosses:
-        print(f"UWAGA: W pliku Excel brakuje wpisów w kolumnie 'kolejność znaków' dla następujących nagrań:")
-        for b in missing_glosses[:5]:  
-            print(f" - {b}")
-        if len(missing_glosses) > 5:
-            print(f" ...i {len(missing_glosses) - 5} innych.")
-            
-        if not ask_yes_no("Czy pominąć brakujące i kontynuować przebudowę plików?"):
-            sys.exit(1)
-            
     counter: int = 0
     for json_path in json_files:
         filename = os.path.basename(json_path)
+        
         if filename in protected_files:
             continue
 
@@ -348,26 +333,28 @@ def main() -> None:
         
         json_sentence = data.get("sentence", "").strip().lower()
         
-        if json_sentence in sentences_db:
-            raw_glosses = sentences_db[json_sentence]['glosses']
+        p_id_raw = data.get('person_id', '')
+        s_id_raw = data.get('sentence_id', '')
+        error_key_raw = f"{p_id_raw}_{s_id_raw}"
+
+        if error_key_raw in pop_glosy_db:
+            raw_glosses = pop_glosy_db[error_key_raw]
         else:
-            raw_glosses = None
+            if json_sentence in sentences_db:
+                raw_glosses = sentences_db[json_sentence]['glosses']
+            else:
+                raw_glosses = None
         
         gloss_list = data.get("glosses", data.get("glosy", [])) 
         if raw_glosses:
             separator = ',' if ',' in str(raw_glosses) else ' '
             gloss_list = [g.strip() for g in str(raw_glosses).split(separator) if g.strip()]
 
-        p_id_raw = data.get('person_id', '')
-        s_id_raw = data.get('sentence_id', '')
-        
         try:
             error_key_int = f"{int(p_id_raw)}_{int(s_id_raw)}"
         except ValueError:
             error_key_int = None
             
-        error_key_raw = f"{p_id_raw}_{s_id_raw}"
-
         is_correct = True
         if (error_key_int and error_key_int in errors_set) or (error_key_raw in errors_set):
             is_correct = False
@@ -388,7 +375,7 @@ def main() -> None:
         except PermissionError:
             global_skipped_files.add(filename)
 
-    print(f"\nGotowe! Zaktualizowano strukturę JSON dla {counter} plików (pominięto chronione pliki).")
+    print(f"\nGotowe! Zaktualizowano strukturę JSON dla {counter} plików.")
 
     if global_skipped_files:
         print("\n" + "=" * 60)
@@ -398,7 +385,6 @@ def main() -> None:
         for sf in sorted(list(global_skipped_files)):
             print(f" -> {sf}")
         print("-" * 60)
-        print("Wniosek: Przekaż tę listę koledze, aby odblokował uprawnienia (chown) dla tych nagrań.")
 
 if __name__ == "__main__":
     main()
