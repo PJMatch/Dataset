@@ -27,9 +27,9 @@ except ImportError:
     print("Zainstaluj ją wpisując w terminalu: pip install imageio-ffmpeg")
     sys.exit(1)
 
-VIDEO_FOLDER = "/pjm/baza_wideo"
-EXCEL_FILE = "/home/micliber/test/Dataset/Sentences/prepared_sentences_m.xlsx"
-ERRORS_FILE = "Błędy.txt"
+VIDEO_FOLDER = "ścierzka/do/pliku"
+EXCEL_FILE = "ścierzka/do/pliku"
+ERRORS_FILE = "ścierzka/do/pliku"
 POP_GLOSY_FILE = "pop_glosy.txt"
 
 def ask_yes_no(question: str) -> bool:
