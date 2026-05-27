@@ -23,6 +23,7 @@ from reorder_dialog import ReorderDialog
 from video_backend import VideoBackend
 
 
+# --- Background Threads ---
 class FetchListWorker(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
@@ -63,6 +64,9 @@ class DownloadWorker(QThread):
             self.error.emit(str(e))
 
 
+# ---------------------------------------------
+
+
 class MainWindow(QMainWindow):
     def __init__(self, ssh_manager):
         super().__init__()
@@ -89,8 +93,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
+        # Top Bar
         top_bar = QHBoxLayout()
-
         self.browse_btn = QPushButton("1. Fetch New Range")
         self.browse_btn.setStyleSheet(
             "background-color: #444; color: white; padding: 5px; font-weight: bold;"
@@ -113,18 +117,21 @@ class MainWindow(QMainWindow):
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
+        # Video Player
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black;")
         self.video_label.setMinimumSize(640, 360)
         layout.addWidget(self.video_label, stretch=1)
 
+        # Slider
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.setEnabled(False)
         layout.addWidget(self.slider)
 
+        # Combo Box and Skip Button
         gloss_layout = QHBoxLayout()
         self.gloss_label = QLabel("Current Gloss:")
         self.gloss_label.setStyleSheet(
@@ -142,7 +149,7 @@ class MainWindow(QMainWindow):
 
         gloss_layout.addStretch()
 
-        self.skip_btn = QPushButton("⏭ Skip Video")
+        self.skip_btn = QPushButton("⏭ Skip Video (Do Later)")
         self.skip_btn.setStyleSheet(
             "background-color: #f0ad4e; color: black; font-weight: bold; padding: 5px;"
         )
@@ -153,6 +160,7 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(gloss_layout)
 
+        # History List
         history_layout = QVBoxLayout()
         history_layout.addWidget(
             QLabel("Recorded Timestamps (Click to select, press Delete to remove):")
@@ -174,20 +182,19 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(history_layout)
 
+    # --- Core Mechanics ---
     def cleanup_temp_video(self):
         if self.video_backend.cap:
             self.video_backend.cap.release()
             self.video_backend.cap = None
-
         if self.current_temp_video and os.path.exists(self.current_temp_video):
             try:
                 os.remove(self.current_temp_video)
-            except Exception as e:
-                print(f"Failed to delete temp video: {e}")
+            except Exception:
+                pass
             self.current_temp_video = None
 
     def reset_annotation_ui(self):
-        """Clears the screen before loading a new video."""
         self.cleanup_temp_video()
         self.annotation_data = None
         self.video_label.clear()
@@ -202,6 +209,7 @@ class MainWindow(QMainWindow):
         if self.last_query_key in self.dataset_cache:
             self.cached_list_btn.setEnabled(state)
 
+    # --- Data Flow ---
     def browse_remote(self):
         range_dialog = RangeInputDialog(self)
         if range_dialog.exec() == QDialog.DialogCode.Accepted:
@@ -210,7 +218,6 @@ class MainWindow(QMainWindow):
             return
 
         self.last_query_key = (min_id, max_id)
-
         if self.last_query_key in self.dataset_cache:
             self.on_fetch_success(
                 self.dataset_cache[self.last_query_key], from_cache=True
@@ -243,7 +250,15 @@ class MainWindow(QMainWindow):
         browser = FileBrowserDialog(datasets, self)
         if browser.exec() == QDialog.DialogCode.Accepted and browser.selected_dataset:
             self.current_dataset = browser.selected_dataset
-            self.load_dataset(browser.selected_dataset)
+
+            if self.last_query_key and self.last_query_key in self.dataset_cache:
+                current_list = self.dataset_cache[self.last_query_key]
+                if self.current_dataset in current_list:
+                    idx = current_list.index(self.current_dataset)
+                    rotated_list = current_list[idx:] + current_list[:idx]
+                    self.dataset_cache[self.last_query_key] = rotated_list
+
+            self.load_dataset(self.current_dataset)
         else:
             self.status_label.setText("Browse cancelled.")
 
@@ -288,10 +303,19 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Error loading dataset.")
 
     def load_next_dataset(self):
-        """Finds and loads the next unannotated dataset from the cached list."""
+        """Finds the next video by treating the list as a circular loop."""
         next_dataset = None
+
         if self.last_query_key and self.last_query_key in self.dataset_cache:
-            for ds in self.dataset_cache[self.last_query_key]:
+            current_list = self.dataset_cache[self.last_query_key]
+
+            if self.current_dataset in current_list:
+                idx = current_list.index(self.current_dataset)
+                current_list = current_list[idx + 1 :] + current_list[: idx + 1]
+
+                self.dataset_cache[self.last_query_key] = current_list
+
+            for ds in current_list:
                 if not ds["annotated"]:
                     next_dataset = ds
                     break
@@ -301,12 +325,13 @@ class MainWindow(QMainWindow):
             self.load_dataset(next_dataset)
         else:
             self.status_label.setText(
-                "All videos in this range are annotated! Please fetch a new range."
+                "Finished the current batch! Please fetch a new range."
             )
             QMessageBox.information(
                 self, "Finished", "All videos in the current list are complete!"
             )
 
+    # --- UI Interactions ---
     def show_frame(self, frame_idx):
         frame = self.video_backend.get_frame(frame_idx)
         if frame is not None:
@@ -392,12 +417,6 @@ class MainWindow(QMainWindow):
     def skip_video(self):
         if not self.current_dataset or not self.last_query_key:
             return
-
-        if self.last_query_key in self.dataset_cache:
-            current_list = self.dataset_cache[self.last_query_key]
-            if self.current_dataset in current_list:
-                current_list.remove(self.current_dataset)
-                current_list.append(self.current_dataset)
 
         self.reset_annotation_ui()
         self.load_next_dataset()
