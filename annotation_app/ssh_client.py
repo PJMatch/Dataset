@@ -89,6 +89,15 @@ class SSHManager:
             json_str = json.dumps(data, ensure_ascii=False, indent=4)
             f.write(json_str.encode("utf-8"))
 
+    def check_writable(self, remote_path):
+        """Tests if the current SSH user has write permissions for the file."""
+        try:
+            with self.sftp.open(remote_path, "a") as _:
+                pass
+            return True
+        except IOError:
+            return False
+
     def download_video_temp(self, remote_path):
         fd, temp_path = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
