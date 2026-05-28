@@ -58,9 +58,7 @@ class DownloadWorker(QThread):
             annotation_data = AnnotationData(
                 self.ssh_manager, self.dataset["json_path"]
             )
-
             is_writable = self.ssh_manager.check_writable(self.dataset["json_path"])
-
             self.finished.emit(temp_video, annotation_data, is_writable)
         except Exception as e:
             self.error.emit(str(e))
@@ -114,6 +112,16 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Connected. Please fetch a new range.")
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
+
+        self.reject_btn = QPushButton("🗑 Recorded Incorrectly")
+        self.reject_btn.setStyleSheet(
+            "background-color: #d9534f; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.reject_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.reject_btn.setEnabled(False)
+        self.reject_btn.clicked.connect(self.reject_video)
+        top_bar.addWidget(self.reject_btn)
+
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
@@ -146,7 +154,7 @@ class MainWindow(QMainWindow):
 
         gloss_layout.addStretch()
 
-        self.skip_btn = QPushButton("⏭ Skip Video (Do Later)")
+        self.skip_btn = QPushButton("⏭ Do Later")
         self.skip_btn.setStyleSheet(
             "background-color: #f0ad4e; color: black; font-weight: bold; padding: 5px;"
         )
@@ -197,6 +205,7 @@ class MainWindow(QMainWindow):
         self.gloss_combo.clear()
         self.gloss_combo.setEnabled(False)
         self.skip_btn.setEnabled(False)
+        self.reject_btn.setEnabled(False)
         self.history_list.clear()
 
     def set_buttons_enabled(self, state):
@@ -276,6 +285,7 @@ class MainWindow(QMainWindow):
         self.skip_btn.setEnabled(True)
 
         self.current_is_writable = is_writable
+        self.reject_btn.setEnabled(is_writable)
 
         self.current_temp_video = temp_video
         self.video_backend.load(self.current_temp_video)
@@ -347,11 +357,8 @@ class MainWindow(QMainWindow):
 
             if self.current_dataset:
                 dot = "🟢" if self.current_is_writable else "🔴"
-                color = (
-                    "#4CAF50" if self.current_is_writable else "#F44336"
-                )  # Green or Red
+                color = "#4CAF50" if self.current_is_writable else "#F44336"
                 fname = f"{self.current_dataset['name']}.json"
-
                 text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   {dot} <span style='color:{color}; font-weight:bold;'>{fname}</span>"
             else:
                 text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}"
@@ -416,6 +423,31 @@ class MainWindow(QMainWindow):
 
         if self.history_list.count() > 0:
             self.history_list.setCurrentRow(self.history_list.count() - 1)
+
+    def reject_video(self):
+        if not self.annotation_data or not self.current_dataset:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Rejection",
+            "Are you SURE you want to mark this video as poorly recorded?\n\nThis will instantly set 'recorded_correctly: false' on the server and skip the video permanently.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.annotation_data.set_recorded_correctly_false()
+
+                if self.current_dataset:
+                    self.current_dataset["annotated"] = True
+
+                self.reset_annotation_ui()
+                self.load_next_dataset()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to reject file:\n{e}")
 
     def skip_video(self):
         if not self.current_dataset or not self.last_query_key:

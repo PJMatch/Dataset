@@ -39,9 +39,11 @@ class AnnotationData:
 
     def finalize_and_save(self, reordered_glosses):
         sorted_timestamps = sorted(self.timestamps)
-
         self.data["glosses"] = [
             [g, t] for g, t in zip(reordered_glosses, sorted_timestamps)
         ]
+        self.ssh_manager.save_json_memory(self.json_remote_path, self.data)
 
+    def set_recorded_correctly_false(self):
+        self.data["recorded_correctly"] = False
         self.ssh_manager.save_json_memory(self.json_remote_path, self.data)
