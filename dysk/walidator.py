@@ -8,8 +8,6 @@ This script performs a series of automated checks and corrections on the recorde
 4. Corrects sentence IDs in JSON files if they differ from the Excel database.
 5. Updates the JSON structure to include 'glosses' (sign sequence) and a 
    'recorded_correctly' flag based on a provided errors list.
-6. OVERRIDES glosses if they are defined in pop_glosy.txt.
-7. PROTECTS annotated JSON files from being overwritten.
 """
 
 import glob
@@ -19,17 +17,12 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Set
 import pandas as pd
+import imageio_ffmpeg
 
-try:
-    import imageio_ffmpeg
-except ImportError:
-    print("BŁĄD: Brakuje biblioteki 'imageio-ffmpeg'.")
-    print("Zainstaluj ją wpisując w terminalu: pip install imageio-ffmpeg")
-    sys.exit(1)
 
-VIDEO_FOLDER = "ścierzka/do/pliku"
-EXCEL_FILE = "ścierzka/do/pliku"
-ERRORS_FILE = "ścierzka/do/pliku"
+VIDEO_FOLDER = "/path/to/file"
+EXCEL_FILE = "/path/to/file"
+ERRORS_FILE = "/path/to/file"
 POP_GLOSY_FILE = "pop_glosy.txt"
 
 def ask_yes_no(question: str) -> bool:
@@ -115,16 +108,29 @@ def main() -> None:
 
     global_skipped_files: Set[str] = set()
     protected_files: Set[str] = set()
+    new_errors_from_json: Set[str] = set()
 
-    print("\n--- Skanowanie zabezpieczonych (zaadnotowanych) plików ---")
+    print("\n--- Skanowanie plików JSON (Zabezpieczenia i flagi poprawności) ---")
     json_files = glob.glob(os.path.join(VIDEO_FOLDER, "*.json"))
     
     for json_path in json_files:
         try:
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                
                 if is_annotated(data):
                     protected_files.add(os.path.basename(json_path))
+                
+                if data.get("recorded_correctly") is False:
+                    p_id = str(data.get("person_id", "")).strip()
+                    s_id = str(data.get("sentence_id", "")).strip()
+                    if p_id and s_id:
+                        try:
+                            err_key = f"{int(p_id)}_{int(s_id):02d}"
+                        except ValueError:
+                            err_key = f"{p_id}_{s_id}"
+                        new_errors_from_json.add(err_key)
+
         except PermissionError:
             global_skipped_files.add(os.path.basename(json_path))
         except json.JSONDecodeError:
@@ -147,6 +153,17 @@ def main() -> None:
     else:
         print(f"\nUWAGA: Nie znaleziono pliku '{ERRORS_FILE}'.")
 
+    errors_to_append = [err for err in new_errors_from_json if err not in errors_set]
+    if errors_to_append:
+        try:
+            with open(ERRORS_FILE, 'a', encoding='utf-8') as f:
+                for err in sorted(errors_to_append):
+                    f.write(err + "\n")
+            print(f"-> Zaktualizowano {ERRORS_FILE}: Dopisano {len(errors_to_append)} błędnych nagrań wyłapanych prosto z JSON (zabezpieczenie flag false).")
+        except PermissionError:
+            print(f"-> BŁĄD: Brak uprawnień do zapisu w {ERRORS_FILE}.")
+        errors_set.update(errors_to_append)
+
     pop_glosy_db = {}
     if os.path.exists(POP_GLOSY_FILE):
         with open(POP_GLOSY_FILE, 'r', encoding='utf-8') as f:
@@ -157,11 +174,9 @@ def main() -> None:
                     key, val = line.split('_"', 1)
                     val = val.rstrip('"')
                     pop_glosy_db[key] = val
-        print(f"\n-> Wczytano {len(pop_glosy_db)} dedykowanych nadpisań glosów z '{POP_GLOSY_FILE}'.")
+        print(f"-> Wczytano {len(pop_glosy_db)} dedykowanych nadpisań glosów z '{POP_GLOSY_FILE}'.")
 
     print("\n--- Oczyszczanie nagrań z dźwięku ---")
-    skipped_audio = remove_audio_from_videos(VIDEO_FOLDER)
-    global_skipped_files.update(skipped_audio)
 
     try:
         df: pd.DataFrame = pd.read_excel(EXCEL_FILE)
@@ -336,7 +351,6 @@ def main() -> None:
         p_id_raw = data.get('person_id', '')
         s_id_raw = data.get('sentence_id', '')
         error_key_raw = f"{p_id_raw}_{s_id_raw}"
-
         if error_key_raw in pop_glosy_db:
             raw_glosses = pop_glosy_db[error_key_raw]
         else:
@@ -352,11 +366,15 @@ def main() -> None:
 
         try:
             error_key_int = f"{int(p_id_raw)}_{int(s_id_raw)}"
+            error_key_padded = f"{int(p_id_raw)}_{int(s_id_raw):02d}"
         except ValueError:
             error_key_int = None
+            error_key_padded = None
             
         is_correct = True
-        if (error_key_int and error_key_int in errors_set) or (error_key_raw in errors_set):
+        if (error_key_int and error_key_int in errors_set) or \
+           (error_key_raw in errors_set) or \
+           (error_key_padded and error_key_padded in errors_set):
             is_correct = False
 
         new_data = {
