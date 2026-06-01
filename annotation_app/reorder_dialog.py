@@ -31,8 +31,7 @@ class ReorderDialog(QDialog):
         info = QLabel(
             "<b>Annotation Complete!</b><br>"
             "Drag and drop the items below to change their order.<br>"
-            "<i>Timestamps will remain in chronological order.</i><br>"
-            "<i>(Note: The 'EoR' token is safely locked to the end).</i>"
+            "<i>Timestamps will remain in chronological order.</i>"
         )
         layout.addWidget(info)
 

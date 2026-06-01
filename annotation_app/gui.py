@@ -1,13 +1,16 @@
+import csv
 import os
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -64,12 +67,133 @@ class DownloadWorker(QThread):
             self.error.emit(str(e))
 
 
+class ExchangeDialog(QDialog):
+    def __init__(self, word_pool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Gloss")
+        self.resize(300, 400)
+        self.word_pool = word_pool
+        self.selected_word = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Type to filter, then double-click a word:"))
+
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search...")
+        self.search_box.textChanged.connect(self.filter_list)
+        layout.addWidget(self.search_box)
+
+        self.list_widget = QListWidget()
+        self.list_widget.addItems(self.word_pool)
+        self.list_widget.itemDoubleClicked.connect(self.accept_selection)
+        layout.addWidget(self.list_widget)
+
+        self.btn = QPushButton("Select Highlighted")
+        self.btn.setStyleSheet(
+            "background-color: #5bc0de; color: black; font-weight: bold;"
+        )
+        self.btn.clicked.connect(self.accept_selection)
+        layout.addWidget(self.btn)
+
+    def filter_list(self, text):
+        self.list_widget.clear()
+        if not text:
+            self.list_widget.addItems(self.word_pool)
+        else:
+            filtered = [w for w in self.word_pool if text.lower() in w.lower()]
+            self.list_widget.addItems(filtered)
+
+    def accept_selection(self):
+        if self.list_widget.currentItem():
+            self.selected_word = self.list_widget.currentItem().text()
+            self.accept()
+
+
+class EditStructureDialog(QDialog):
+    def __init__(self, current_glosses, word_pool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit JSON Structure")
+        self.resize(350, 500)
+        self.word_pool = word_pool
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel("Drag and drop to reorder.\nUse buttons below to modify the list:")
+        )
+
+        self.list_widget = QListWidget()
+        self.list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+
+        display_glosses = list(current_glosses)
+        if display_glosses and display_glosses[-1] == "EoR":
+            display_glosses.pop()
+
+        self.list_widget.addItems(display_glosses)
+        layout.addWidget(self.list_widget)
+
+        btn_row = QHBoxLayout()
+        self.add_btn = QPushButton("➕ Add")
+        self.add_btn.clicked.connect(self.add_gloss)
+        btn_row.addWidget(self.add_btn)
+
+        self.remove_btn = QPushButton("➖ Remove")
+        self.remove_btn.clicked.connect(self.remove_gloss)
+        btn_row.addWidget(self.remove_btn)
+
+        self.exchange_btn = QPushButton("🔄 Exchange")
+        self.exchange_btn.clicked.connect(self.exchange_gloss)
+        btn_row.addWidget(self.exchange_btn)
+
+        layout.addLayout(btn_row)
+
+        save_row = QHBoxLayout()
+        self.save_btn = QPushButton("💾 Save New Structure")
+        self.save_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.save_btn.clicked.connect(self.accept)
+        save_row.addStretch()
+        save_row.addWidget(self.save_btn)
+        layout.addLayout(save_row)
+
+    def add_gloss(self):
+        dialog = ExchangeDialog(self.word_pool, self)
+        dialog.setWindowTitle("Select Gloss to Add")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_word:
+            row = self.list_widget.currentRow()
+            if row < 0:
+                row = self.list_widget.count()
+            else:
+                row += 1
+            self.list_widget.insertItem(row, dialog.selected_word)
+            self.list_widget.setCurrentRow(row)
+
+    def remove_gloss(self):
+        row = self.list_widget.currentRow()
+        if row >= 0:
+            self.list_widget.takeItem(row)
+
+    def exchange_gloss(self):
+        row = self.list_widget.currentRow()
+        if row >= 0:
+            dialog = ExchangeDialog(self.word_pool, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_word:
+                self.list_widget.item(row).setText(dialog.selected_word)
+
+    def get_new_structure(self):
+        glosses = [
+            self.list_widget.item(i).text() for i in range(self.list_widget.count())
+        ]
+        glosses.append("EoR")
+        return glosses
+
+
 class MainWindow(QMainWindow):
     def __init__(self, ssh_manager):
         super().__init__()
         self.ssh_manager = ssh_manager
         self.setWindowTitle("Dataset Annotator (SSH)")
-        self.resize(800, 700)
+        self.resize(900, 700)
         self.setStyleSheet(
             "QMainWindow { background-color: #2E2E2E; } QLabel { color: white; }"
         )
@@ -84,7 +208,20 @@ class MainWindow(QMainWindow):
         self.last_query_key = None
         self.current_is_writable = True
 
+        self.word_pool = []
+        self.load_word_pool()
+
         self.init_ui()
+
+    def load_word_pool(self):
+        if os.path.exists("word_pool.csv"):
+            with open("word_pool.csv", "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if row:
+                        self.word_pool.append(row[0].strip())
+        else:
+            print("Warning: word_pool.csv not found in the application directory.")
 
     def init_ui(self):
         central_widget = QWidget()
@@ -92,20 +229,22 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central_widget)
 
         top_bar = QHBoxLayout()
-        self.browse_btn = QPushButton("1. Fetch New Range")
+        self.browse_btn = QPushButton("Fetch New Range")
         self.browse_btn.setStyleSheet(
             "background-color: #444; color: white; padding: 5px; font-weight: bold;"
         )
         self.browse_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.browse_btn.setFixedHeight(35)
         self.browse_btn.clicked.connect(self.browse_remote)
         top_bar.addWidget(self.browse_btn)
 
-        self.cached_list_btn = QPushButton("2. Show Cached List")
+        self.cached_list_btn = QPushButton("Show Cached List")
         self.cached_list_btn.setStyleSheet(
             "background-color: #5bc0de; color: black; padding: 5px; font-weight: bold;"
         )
         self.cached_list_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.cached_list_btn.setEnabled(False)
+        self.cached_list_btn.setFixedHeight(35)
         self.cached_list_btn.clicked.connect(self.show_cached_list)
         top_bar.addWidget(self.cached_list_btn)
 
@@ -113,12 +252,13 @@ class MainWindow(QMainWindow):
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
 
-        self.reject_btn = QPushButton("🗑 Recorded Incorrectly")
+        self.reject_btn = QPushButton("🗑 Reject Video")
         self.reject_btn.setStyleSheet(
             "background-color: #d9534f; color: white; font-weight: bold; padding: 5px;"
         )
         self.reject_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.reject_btn.setEnabled(False)
+        self.reject_btn.setFixedHeight(35)
         self.reject_btn.clicked.connect(self.reject_video)
         top_bar.addWidget(self.reject_btn)
 
@@ -138,7 +278,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.slider)
 
         gloss_layout = QHBoxLayout()
-        self.gloss_label = QLabel("Current Gloss:")
+        self.gloss_label = QLabel("Gloss:")
         self.gloss_label.setStyleSheet(
             "font-size: 18px; font-weight: bold; color: white;"
         )
@@ -150,7 +290,29 @@ class MainWindow(QMainWindow):
         )
         self.gloss_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.gloss_combo.setEnabled(False)
+        self.gloss_combo.setFixedHeight(35)
         gloss_layout.addWidget(self.gloss_combo)
+
+        self.exchange_btn = QPushButton("🔄")
+        self.exchange_btn.setToolTip("Exchange Current Word")
+        self.exchange_btn.setStyleSheet(
+            "background-color: #337ab7; color: white; font-size: 16px;"
+        )
+        self.exchange_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.exchange_btn.setEnabled(False)
+        self.exchange_btn.setFixedSize(35, 35)
+        self.exchange_btn.clicked.connect(self.quick_exchange_gloss)
+        gloss_layout.addWidget(self.exchange_btn)
+
+        self.edit_struct_btn = QPushButton("📝 Edit List")
+        self.edit_struct_btn.setStyleSheet(
+            "background-color: #9c27b0; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.edit_struct_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.edit_struct_btn.setEnabled(False)
+        self.edit_struct_btn.setFixedHeight(35)
+        self.edit_struct_btn.clicked.connect(self.edit_structure)
+        gloss_layout.addWidget(self.edit_struct_btn)
 
         gloss_layout.addStretch()
 
@@ -160,8 +322,19 @@ class MainWindow(QMainWindow):
         )
         self.skip_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.skip_btn.setEnabled(False)
+        self.skip_btn.setFixedHeight(35)
         self.skip_btn.clicked.connect(self.skip_video)
         gloss_layout.addWidget(self.skip_btn)
+
+        self.save_btn = QPushButton("💾 Save Video")
+        self.save_btn.setStyleSheet(
+            "background-color: #5cb85c; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.save_btn.setEnabled(False)
+        self.save_btn.setFixedHeight(35)
+        self.save_btn.clicked.connect(self.manual_save)
+        gloss_layout.addWidget(self.save_btn)
 
         layout.addLayout(gloss_layout)
 
@@ -204,8 +377,11 @@ class MainWindow(QMainWindow):
         self.slider.setEnabled(False)
         self.gloss_combo.clear()
         self.gloss_combo.setEnabled(False)
+        self.exchange_btn.setEnabled(False)
+        self.edit_struct_btn.setEnabled(False)
         self.skip_btn.setEnabled(False)
         self.reject_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
         self.history_list.clear()
 
     def set_buttons_enabled(self, state):
@@ -286,6 +462,11 @@ class MainWindow(QMainWindow):
 
         self.current_is_writable = is_writable
         self.reject_btn.setEnabled(is_writable)
+        self.save_btn.setEnabled(is_writable)
+
+        if self.word_pool and is_writable:
+            self.exchange_btn.setEnabled(True)
+            self.edit_struct_btn.setEnabled(True)
 
         self.current_temp_video = temp_video
         self.video_backend.load(self.current_temp_video)
@@ -374,6 +555,80 @@ class MainWindow(QMainWindow):
             new_idx = self.video_backend.current_frame_idx + step
             self.show_frame(new_idx)
 
+    def quick_exchange_gloss(self):
+        if not self.annotation_data:
+            return
+
+        dialog = ExchangeDialog(self.word_pool, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_word:
+            new_word = dialog.selected_word
+            current_idx = self.gloss_combo.currentIndex()
+
+            self.gloss_combo.setItemText(current_idx, new_word)
+            self.annotation_data.original_glosses[current_idx] = new_word
+
+        self.setFocus()
+
+    def edit_structure(self):
+        """Opens the full list editor and resets progress if changed."""
+        if not self.annotation_data:
+            return
+
+        if len(self.annotation_data.recorded_glosses) > 0:
+            reply = QMessageBox.question(
+                self,
+                "Warning",
+                "Editing the JSON structure will RESET your current recorded timestamps for this video.\n\nDo you want to proceed?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        dialog = EditStructureDialog(
+            self.annotation_data.original_glosses, self.word_pool, self
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_struct = dialog.get_new_structure()
+            try:
+                self.annotation_data.update_structure(new_struct)
+
+                self.gloss_combo.clear()
+                self.gloss_combo.addItems(self.annotation_data.original_glosses)
+                self.update_ui_state()
+                QMessageBox.information(
+                    self, "Success", "Structure updated and saved to server!"
+                )
+
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Error", f"Failed to save new structure:\n{e}"
+                )
+
+        self.setFocus()
+
+    def validate_save_conditions(self):
+        if not self.annotation_data:
+            return False, "No data loaded."
+
+        recorded = self.annotation_data.recorded_glosses
+        if len(recorded) < 2:
+            return False, "You must record at least 2 glosses to save."
+        if recorded[-1] != "EoR":
+            return (
+                False,
+                "The very last gloss recorded must be 'EoR' (End of Recording).",
+            )
+
+        return True, ""
+
+    def manual_save(self):
+        valid, msg = self.validate_save_conditions()
+        if valid:
+            self.finish_annotation()
+        else:
+            QMessageBox.warning(self, "Cannot Save", msg)
+
     def record_timestamp(self):
         if not self.annotation_data or self.annotation_data.is_complete():
             return
@@ -387,8 +642,17 @@ class MainWindow(QMainWindow):
             self.gloss_combo.setCurrentIndex(next_index)
 
         self.update_ui_state()
+
         if self.annotation_data.is_complete():
-            self.finish_annotation()
+            valid, msg = self.validate_save_conditions()
+            if valid:
+                self.finish_annotation()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Cannot Auto-Save",
+                    f"All glosses recorded, but cannot save yet:\n\n{msg}\n\nPlease fix your history list (Delete) to proceed.",
+                )
 
     def delete_selected_timestamp(self):
         if not self.annotation_data:
@@ -411,9 +675,12 @@ class MainWindow(QMainWindow):
         if self.annotation_data.is_complete():
             self.gloss_label.setText("All glosses recorded! Save dialog opening...")
             self.gloss_combo.setEnabled(False)
+            self.exchange_btn.setEnabled(False)
         else:
-            self.gloss_label.setText("Current Gloss:")
+            self.gloss_label.setText("Gloss:")
             self.gloss_combo.setEnabled(True)
+            if self.word_pool and self.current_is_writable:
+                self.exchange_btn.setEnabled(True)
 
         self.history_list.clear()
         for g, t in zip(
@@ -439,7 +706,6 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             try:
                 self.annotation_data.set_recorded_correctly_false()
-
                 if self.current_dataset:
                     self.current_dataset["annotated"] = True
 

@@ -47,3 +47,18 @@ class AnnotationData:
     def set_recorded_correctly_false(self):
         self.data["recorded_correctly"] = False
         self.ssh_manager.save_json_memory(self.json_remote_path, self.data)
+
+    def update_structure(self, new_glosses):
+        """Wipes progress and saves a brand new unannotated structure to the server."""
+        self.recorded_glosses = []
+        self.timestamps = []
+
+        if not new_glosses or new_glosses[-1] != "EoR":
+            new_glosses.append("EoR")
+
+        self.original_glosses = new_glosses
+
+        self.data["glosses"] = new_glosses
+        self.data["recorded_correctly"] = True
+
+        self.ssh_manager.save_json_memory(self.json_remote_path, self.data)
