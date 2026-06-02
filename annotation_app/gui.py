@@ -1,7 +1,7 @@
 import csv
 import os
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -211,6 +212,10 @@ class MainWindow(QMainWindow):
         self.word_pool = []
         self.load_word_pool()
 
+        self._preview_timer = QTimer(self)
+        self._preview_timer.timeout.connect(self._preview_tick)
+        self._preview_end_frame = 0
+
         self.init_ui()
 
     def load_word_pool(self):
@@ -300,6 +305,10 @@ class MainWindow(QMainWindow):
         self.slider = VideoTransport()
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.boundaryChanged.connect(self.on_boundary_changed)
+        self.slider.glossesSwapped.connect(self.on_glosses_swapped)
+        self.slider.segmentContextMenuRequested.connect(
+            self.on_segment_context_menu
+        )
         self.slider.setEnabled(False)
         layout.addWidget(self.slider)
 
@@ -418,13 +427,20 @@ class MainWindow(QMainWindow):
                 pass
             self.current_temp_video = None
 
+    def stop_gloss_preview(self):
+        if self._preview_timer.isActive():
+            self._preview_timer.stop()
+
     def reset_annotation_ui(self):
+        self.stop_gloss_preview()
         self.cleanup_temp_video()
         self.annotation_data = None
         self.video_label.clear()
         self.next_gloss_overlay.hide()
         self.slider.setEnabled(False)
+        self.slider.set_gloss_colors({})
         self.slider.set_segments([])
+        self.slider.clear_segment_selection()
         self.gloss_combo.clear()
         self.gloss_combo.setEnabled(False)
         self.exchange_btn.setEnabled(False)
@@ -602,6 +618,24 @@ class MainWindow(QMainWindow):
 
             self.status_label.setText(text)
 
+    def _gloss_color_map(self):
+        """Stable color index per gloss string for this sentence (not timeline position)."""
+        if not self.annotation_data:
+            return {}
+        mapping = {}
+        idx = 0
+        for gloss in self.annotation_data.original_glosses:
+            if gloss == "EoR":
+                continue
+            if gloss not in mapping:
+                mapping[gloss] = idx
+                idx += 1
+        for gloss in self.annotation_data.recorded_glosses:
+            if gloss not in mapping:
+                mapping[gloss] = idx
+                idx += 1
+        return mapping
+
     def _build_stamp_segments(self):
         if not self.annotation_data:
             return []
@@ -628,12 +662,14 @@ class MainWindow(QMainWindow):
             return
         if self.video_backend.cap:
             self.slider.set_total_frames(self.video_backend.total_frames)
+            self.slider.set_gloss_colors(self._gloss_color_map())
             self.slider.set_segments(self._build_stamp_segments())
             if self.annotation_data:
                 self.slider.set_boundaries(self.annotation_data.timestamps)
             else:
                 self.slider.set_boundaries([])
         else:
+            self.slider.set_gloss_colors({})
             self.slider.set_segments([])
             self.slider.set_boundaries([])
 
@@ -641,18 +677,216 @@ class MainWindow(QMainWindow):
         if not self.annotation_data:
             return
         times = self.annotation_data.timestamps
-        if index <= 0 or index >= len(times) - 1:
+        if index < 0 or index >= len(times):
             return
-        times[index] = frame
+        lo = times[index - 1] + 1 if index > 0 else 0
+        hi = (
+            times[index + 1] - 1
+            if index + 1 < len(times)
+            else self.video_backend.total_frames - 1
+        )
+        times[index] = max(lo, min(hi, frame))
         self._refresh_stamp_slider()
         self.update_ui_state()
         self.show_frame(frame)
+
+    def _segment_frame_range(self, segment_index):
+        if not self.annotation_data:
+            return None
+        times = self.annotation_data.timestamps
+        if segment_index < 0 or segment_index >= len(times):
+            return None
+        start = times[segment_index]
+        if segment_index + 1 < len(times):
+            end = times[segment_index + 1] - 1
+        else:
+            end = self.video_backend.current_frame_idx
+        end = max(start, min(end, self.video_backend.total_frames - 1))
+        return start, end
+
+    def _preview_interval_ms(self):
+        fps = self.video_backend.fps or 25.0
+        return max(1, int(1000 / fps))
+
+    def start_gloss_preview(self, segment_index):
+        if not self.video_backend.cap:
+            return
+        span = self._segment_frame_range(segment_index)
+        if not span:
+            return
+        start, end = span
+        if end < start:
+            return
+        self.stop_gloss_preview()
+        self._preview_end_frame = end
+        self.show_frame(start)
+        self._preview_timer.start(self._preview_interval_ms())
+
+    def _preview_tick(self):
+        idx = self.video_backend.current_frame_idx
+        if idx >= self._preview_end_frame:
+            self.stop_gloss_preview()
+            return
+        self.show_frame(idx + 1)
+
+    def on_glosses_swapped(self, i, j):
+        if not self.annotation_data:
+            return
+        glosses = self.annotation_data.recorded_glosses
+        if 0 <= i < len(glosses) and 0 <= j < len(glosses):
+            glosses[i], glosses[j] = glosses[j], glosses[i]
+        self._refresh_stamp_slider()
+        self.update_ui_state()
+
+    def _context_menu_style(self):
+        return """
+            QMenu {
+                background-color: #323232;
+                color: #f0f0f0;
+                border: 1px solid #4a4a4a;
+                border-radius: 8px;
+                padding: 6px 4px;
+            }
+            QMenu::item {
+                padding: 8px 28px 8px 20px;
+                border-radius: 4px;
+                margin: 2px 6px;
+            }
+            QMenu::item:selected {
+                background-color: #4a4a4a;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #4a4a4a;
+                margin: 4px 10px;
+            }
+        """
+
+    def on_segment_context_menu(self, segment_index, frame, global_pos):
+        if not self.annotation_data:
+            return
+
+        selected = self.slider.selected_segment()
+        is_selected_target = (
+            selected is not None
+            and segment_index >= 0
+            and segment_index == selected
+        )
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_style())
+
+        if is_selected_target:
+            delete_action = menu.addAction("Delete gloss")
+            replace_action = menu.addAction("Replace")
+            preview_action = menu.addAction("Preview")
+            if not self.current_is_writable:
+                delete_action.setEnabled(False)
+                replace_action.setEnabled(False)
+            chosen = menu.exec(global_pos)
+            if chosen is None:
+                return
+            if chosen == delete_action:
+                self._delete_gloss_at_segment(segment_index)
+            elif chosen == replace_action:
+                self._replace_gloss_at_segment(segment_index)
+            elif chosen == preview_action:
+                self.setFocus()
+                self.start_gloss_preview(segment_index)
+        else:
+            add_action = menu.addAction("Add gloss")
+            if not self.current_is_writable:
+                add_action.setEnabled(False)
+            chosen = menu.exec(global_pos)
+            if chosen is None:
+                return
+            if chosen == add_action:
+                self._add_gloss(segment_index, frame)
+
+    def _insert_index_for_frame(self, frame):
+        times = self.annotation_data.timestamps
+        for i, t in enumerate(times):
+            if frame < t:
+                return i
+        return len(times)
+
+    def _add_gloss(self, segment_index, frame):
+        if not self.annotation_data or not self.word_pool:
+            return
+
+        dialog = ExchangeDialog(self.word_pool, self)
+        dialog.setWindowTitle("Add gloss")
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_word:
+            return
+
+        times = self.annotation_data.timestamps
+        max_frame = self.video_backend.total_frames - 1
+
+        if segment_index >= 0 and segment_index < len(times):
+            insert_at = segment_index + 1
+            lo = times[segment_index] + 1
+            hi = (
+                times[insert_at] - 1
+                if insert_at < len(times)
+                else max_frame
+            )
+        else:
+            insert_at = self._insert_index_for_frame(frame)
+            lo = times[insert_at - 1] + 1 if insert_at > 0 else 0
+            hi = times[insert_at] - 1 if insert_at < len(times) else max_frame
+
+        frame = max(lo, min(hi, frame))
+
+        self.annotation_data.insert_timestamp(
+            insert_at, dialog.selected_word, frame
+        )
+        self._refresh_stamp_slider()
+        self.update_ui_state()
+        self.show_frame(frame)
+
+    def _replace_gloss_at_segment(self, segment_index):
+        if not self.annotation_data or not self.word_pool:
+            return
+        if segment_index < 0 or segment_index >= len(
+            self.annotation_data.recorded_glosses
+        ):
+            return
+
+        dialog = ExchangeDialog(self.word_pool, self)
+        dialog.setWindowTitle("Replace gloss")
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_word:
+            return
+
+        self.annotation_data.recorded_glosses[segment_index] = dialog.selected_word
+        self._refresh_stamp_slider()
+        self.update_ui_state()
+        self.setFocus()
+
+    def _delete_gloss_at_segment(self, segment_index):
+        if not self.annotation_data:
+            return
+        if segment_index < 0 or segment_index >= len(
+            self.annotation_data.timestamps
+        ):
+            return
+
+        deleted_gloss = self.annotation_data.recorded_glosses[segment_index]
+        self.annotation_data.delete_timestamp(segment_index)
+
+        idx = self.gloss_combo.findText(deleted_gloss)
+        if idx >= 0:
+            self.gloss_combo.setCurrentIndex(idx)
+
+        self.slider.clear_segment_selection()
+        self._refresh_stamp_slider()
+        self.update_ui_state()
 
     def on_slider_changed(self, value):
         if not self.is_updating_slider:
             self.show_frame(value)
 
     def step_frame(self, step):
+        self.stop_gloss_preview()
         if self.video_backend.cap:
             new_idx = self.video_backend.current_frame_idx + step
             self.show_frame(new_idx)
@@ -858,7 +1092,17 @@ class MainWindow(QMainWindow):
         if not self.annotation_data:
             return super().keyPressEvent(event)
 
-        if event.key() == Qt.Key.Key_Left:
+        if event.key() == Qt.Key.Key_Space:
+            if self._preview_timer.isActive():
+                self.stop_gloss_preview()
+                event.accept()
+                return
+            seg = self.slider.selected_segment()
+            if seg is not None:
+                self.start_gloss_preview(seg)
+                event.accept()
+                return
+        elif event.key() == Qt.Key.Key_Left:
             self.step_frame(-1)
         elif event.key() == Qt.Key.Key_Right:
             self.step_frame(1)
@@ -875,6 +1119,7 @@ class MainWindow(QMainWindow):
             self._position_next_gloss_overlay()
 
     def closeEvent(self, event):
+        self.stop_gloss_preview()
         self.cleanup_temp_video()
         self.ssh_manager.disconnect()
         event.accept()

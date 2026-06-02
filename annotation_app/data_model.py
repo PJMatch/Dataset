@@ -34,6 +34,11 @@ class AnnotationData:
             self.recorded_glosses.pop(index)
             self.timestamps.pop(index)
 
+    def insert_timestamp(self, index, gloss, frame_idx):
+        index = max(0, min(index, len(self.timestamps)))
+        self.recorded_glosses.insert(index, gloss)
+        self.timestamps.insert(index, frame_idx)
+
     def is_complete(self):
         return len(self.timestamps) >= len(self.original_glosses)
 
