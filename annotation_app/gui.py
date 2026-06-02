@@ -1,7 +1,7 @@
 import csv
 import os
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -211,6 +211,10 @@ class MainWindow(QMainWindow):
         self.word_pool = []
         self.load_word_pool()
 
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self.on_playback_tick)
+        self.is_playing = False
+
         self.init_ui()
 
     def load_word_pool(self):
@@ -265,17 +269,54 @@ class MainWindow(QMainWindow):
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
+        self.video_container = QWidget()
+        self.video_container.setMinimumSize(640, 360)
+        self.video_container.setStyleSheet("background-color: black;")
+        video_container_layout = QVBoxLayout(self.video_container)
+        video_container_layout.setContentsMargins(0, 0, 0, 0)
+
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black;")
-        self.video_label.setMinimumSize(640, 360)
-        layout.addWidget(self.video_label, stretch=1)
+        video_container_layout.addWidget(self.video_label)
+
+        self.next_gloss_overlay = QLabel(self.video_container)
+        self.next_gloss_overlay.setText("")
+        self.next_gloss_overlay.setStyleSheet(
+            "QLabel {"
+            "  background: transparent;"
+            "  color: rgba(255, 224, 130, 0.45);"
+            "  font-size: 52px;"
+            "  font-weight: bold;"
+            "  padding: 0;"
+            "}"
+        )
+        self.next_gloss_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.next_gloss_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground
+        )
+        self.next_gloss_overlay.hide()
+
+        layout.addWidget(self.video_container, stretch=1)
+
+        transport_row = QHBoxLayout()
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setToolTip("Odtwarzaj / Pauza (Spacja)")
+        self.play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.play_btn.setFixedSize(36, 28)
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self.toggle_playback)
+        transport_row.addWidget(self.play_btn)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.setEnabled(False)
-        layout.addWidget(self.slider)
+        transport_row.addWidget(self.slider, stretch=1)
+
+        layout.addLayout(transport_row)
 
         gloss_layout = QHBoxLayout()
         self.gloss_label = QLabel("Gloss:")
@@ -291,6 +332,9 @@ class MainWindow(QMainWindow):
         self.gloss_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.gloss_combo.setEnabled(False)
         self.gloss_combo.setFixedHeight(35)
+        self.gloss_combo.currentIndexChanged.connect(
+            lambda _: self.update_next_gloss_overlay()
+        )
         gloss_layout.addWidget(self.gloss_combo)
 
         self.exchange_btn = QPushButton("🔄")
@@ -359,7 +403,58 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(history_layout)
 
+    def stop_playback(self):
+        self.playback_timer.stop()
+        self.is_playing = False
+        self.play_btn.setText("▶")
+
+    def toggle_playback(self):
+        if not self.video_backend.cap:
+            return
+        if self.is_playing:
+            self.stop_playback()
+        else:
+            self.is_playing = True
+            self.play_btn.setText("⏸")
+            self._apply_playback_interval()
+            self.playback_timer.start()
+
+    def _apply_playback_interval(self):
+        fps = self.video_backend.fps
+        interval_ms = int(1000 / fps / 1.5)
+        self.playback_timer.setInterval(max(1, interval_ms))
+
+    def on_playback_tick(self):
+        if not self.video_backend.cap:
+            self.stop_playback()
+            return
+        next_idx = self.video_backend.current_frame_idx + 1
+        if next_idx >= self.video_backend.total_frames:
+            self.stop_playback()
+            return
+        self.show_frame(next_idx)
+
+    def _position_next_gloss_overlay(self):
+        self.next_gloss_overlay.adjustSize()
+        x = max(0, (self.video_container.width() - self.next_gloss_overlay.width()) // 2)
+        self.next_gloss_overlay.move(x, 4)
+        self.next_gloss_overlay.raise_()
+
+    def update_next_gloss_overlay(self):
+        if not self.annotation_data or self.annotation_data.is_complete():
+            self.next_gloss_overlay.hide()
+            return
+
+        current_word = self.gloss_combo.currentText()
+        if current_word:
+            self.next_gloss_overlay.setText(current_word)
+            self._position_next_gloss_overlay()
+            self.next_gloss_overlay.show()
+        else:
+            self.next_gloss_overlay.hide()
+
     def cleanup_temp_video(self):
+        self.stop_playback()
         if self.video_backend.cap:
             self.video_backend.cap.release()
             self.video_backend.cap = None
@@ -374,7 +469,9 @@ class MainWindow(QMainWindow):
         self.cleanup_temp_video()
         self.annotation_data = None
         self.video_label.clear()
+        self.next_gloss_overlay.hide()
         self.slider.setEnabled(False)
+        self.play_btn.setEnabled(False)
         self.gloss_combo.clear()
         self.gloss_combo.setEnabled(False)
         self.exchange_btn.setEnabled(False)
@@ -476,6 +573,7 @@ class MainWindow(QMainWindow):
         self.slider.setMinimum(0)
         self.slider.setMaximum(self.video_backend.total_frames - 1)
         self.slider.setValue(0)
+        self.play_btn.setEnabled(True)
 
         self.gloss_combo.clear()
         self.gloss_combo.addItems(self.annotation_data.original_glosses)
@@ -531,6 +629,8 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+            if self.next_gloss_overlay.isVisible():
+                self._position_next_gloss_overlay()
 
             self.is_updating_slider = True
             self.slider.setValue(frame_idx)
@@ -548,10 +648,12 @@ class MainWindow(QMainWindow):
 
     def on_slider_changed(self, value):
         if not self.is_updating_slider:
+            self.stop_playback()
             self.show_frame(value)
 
     def step_frame(self, step):
         if self.video_backend.cap:
+            self.stop_playback()
             new_idx = self.video_backend.current_frame_idx + step
             self.show_frame(new_idx)
 
@@ -644,6 +746,7 @@ class MainWindow(QMainWindow):
         self.update_ui_state()
 
         if self.annotation_data.is_complete():
+            self.stop_playback()
             valid, msg = self.validate_save_conditions()
             if valid:
                 self.finish_annotation()
@@ -690,6 +793,8 @@ class MainWindow(QMainWindow):
 
         if self.history_list.count() > 0:
             self.history_list.setCurrentRow(self.history_list.count() - 1)
+
+        self.update_next_gloss_overlay()
 
     def reject_video(self):
         if not self.annotation_data or not self.current_dataset:
@@ -753,7 +858,9 @@ class MainWindow(QMainWindow):
         if not self.annotation_data:
             return super().keyPressEvent(event)
 
-        if event.key() == Qt.Key.Key_Left:
+        if event.key() == Qt.Key.Key_Space:
+            self.toggle_playback()
+        elif event.key() == Qt.Key.Key_Left:
             self.step_frame(-1)
         elif event.key() == Qt.Key.Key_Right:
             self.step_frame(1)
@@ -763,6 +870,11 @@ class MainWindow(QMainWindow):
             self.delete_selected_timestamp()
         else:
             super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.next_gloss_overlay.isVisible():
+            self._position_next_gloss_overlay()
 
     def closeEvent(self, event):
         self.cleanup_temp_video()

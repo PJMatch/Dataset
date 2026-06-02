@@ -5,6 +5,7 @@ class VideoBackend:
     def __init__(self):
         self.cap = None
         self.total_frames = 0
+        self.fps = 25.0
         self.current_frame_idx = -1
         self.last_frame_rgb = None
 
@@ -14,6 +15,8 @@ class VideoBackend:
 
         self.cap = cv2.VideoCapture(path)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.fps = fps if fps and fps > 0 else 25.0
         self.current_frame_idx = -1
         self.last_frame_rgb = None
 
