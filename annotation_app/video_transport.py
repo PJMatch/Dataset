@@ -16,25 +16,31 @@ SEGMENT_COLORS = [
 ]
 
 SEGMENT_ALPHA = 72
+BOUNDARY_HIT_PX = 8
 
 
 class VideoTransport(QWidget):
-    """Gloss track + thin scrub line + vertical playhead (editor-style)."""
+    """Gloss track + scrub line; drag stamp boundaries between glosses."""
 
     valueChanged = pyqtSignal(int)
+    boundaryChanged = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(42)
         self.setMaximumHeight(42)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setMouseTracking(True)
         self._margin = 6
         self._min = 0
         self._max = 0
         self._value = 0
         self._total_frames = 1
         self._segments = []
-        self._dragging = False
+        self._boundaries = []
+        self._hover_boundary = None
+        self._dragging_boundary = None
+        self._dragging_scrub = False
 
     def setMinimum(self, value):
         self._min = value
@@ -66,6 +72,10 @@ class VideoTransport(QWidget):
         self._segments = list(segments)
         self.update()
 
+    def set_boundaries(self, frames):
+        self._boundaries = list(frames)
+        self.update()
+
     def _inner_width(self):
         return max(1, self.width() - 2 * self._margin)
 
@@ -84,6 +94,41 @@ class VideoTransport(QWidget):
         bar_bottom = scrub_y - 1
         bar_top = 15
         return scrub_y, bar_top, bar_bottom
+
+    def _is_draggable_boundary(self, index):
+        """Only boundaries between glosses, not the last stamp (start of final gloss)."""
+        return 1 <= index < len(self._boundaries) - 1
+
+    def _boundary_index_at(self, x):
+        if len(self._boundaries) < 3:
+            return None
+        mx = int(x)
+        best_i = None
+        best_dist = BOUNDARY_HIT_PX + 1
+        for i in range(1, len(self._boundaries) - 1):
+            bx = self._frame_to_x(self._boundaries[i])
+            dist = abs(mx - bx)
+            if dist <= BOUNDARY_HIT_PX and dist < best_dist:
+                best_dist = dist
+                best_i = i
+        return best_i
+
+    def _clamp_boundary_frame(self, index, frame):
+        lo = self._boundaries[index - 1] + 1
+        hi = self._boundaries[index + 1] - 1
+        return max(lo, min(hi, frame))
+
+    def _update_hover_cursor(self, x):
+        if self._dragging_boundary is not None:
+            return
+        hit = self._boundary_index_at(x)
+        if hit != self._hover_boundary:
+            self._hover_boundary = hit
+            if hit is not None:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
+            self.update()
 
     def _draw_segment_label(self, painter, gloss, x1, x2, canvas_w):
         avail = x2 - x1 - 4
@@ -137,6 +182,17 @@ class VideoTransport(QWidget):
             painter.fillRect(x1, bar_top, x2 - x1, bar_bottom - bar_top, color)
             self._draw_segment_label(painter, gloss, x1, x2, w)
 
+        if len(self._boundaries) >= 2:
+            for i in range(1, len(self._boundaries)):
+                bx = self._frame_to_x(self._boundaries[i])
+                if self._is_draggable_boundary(i) and (
+                    i == self._hover_boundary or i == self._dragging_boundary
+                ):
+                    painter.setPen(QPen(QColor("#ffffff"), 3))
+                else:
+                    painter.setPen(QPen(QColor("#666666"), 1))
+                painter.drawLine(bx, bar_top - 1, bx, scrub_y + 1)
+
         painter.setPen(QPen(QColor("#5a5a5a"), 1))
         painter.drawLine(self._margin, scrub_y, w - self._margin, scrub_y)
 
@@ -157,16 +213,54 @@ class VideoTransport(QWidget):
     def mousePressEvent(self, event):
         if not self.isEnabled() or event.button() != Qt.MouseButton.LeftButton:
             return
-        self._dragging = True
-        self._seek(event.position().x())
+        x = event.position().x()
+        boundary = self._boundary_index_at(x)
+        if boundary is not None and self._is_draggable_boundary(boundary):
+            self._dragging_boundary = boundary
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            frame = self._clamp_boundary_frame(
+                boundary, self._x_to_frame(x)
+            )
+            if frame != self._boundaries[boundary]:
+                self._boundaries[boundary] = frame
+                self.boundaryChanged.emit(boundary, frame)
+                self.update()
+        else:
+            self._dragging_scrub = True
+            self._seek(x)
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._seek(event.position().x())
+        x = event.position().x()
+        if self._dragging_boundary is not None:
+            idx = self._dragging_boundary
+            if not self._is_draggable_boundary(idx):
+                self._dragging_boundary = None
+                event.accept()
+                return
+            frame = self._clamp_boundary_frame(idx, self._x_to_frame(x))
+            if frame != self._boundaries[idx]:
+                self._boundaries[idx] = frame
+                self.boundaryChanged.emit(idx, frame)
+                self.update()
             event.accept()
+            return
+        if self._dragging_scrub:
+            self._seek(x)
+            event.accept()
+            return
+        self._update_hover_cursor(x)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False
+            self._dragging_scrub = False
+            self._dragging_boundary = None
+            self._update_hover_cursor(event.position().x())
             event.accept()
+
+    def leaveEvent(self, event):
+        self._hover_boundary = None
+        if self._dragging_boundary is None:
+            self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)

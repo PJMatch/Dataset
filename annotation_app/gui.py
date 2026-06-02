@@ -299,6 +299,7 @@ class MainWindow(QMainWindow):
 
         self.slider = VideoTransport()
         self.slider.valueChanged.connect(self.on_slider_changed)
+        self.slider.boundaryChanged.connect(self.on_boundary_changed)
         self.slider.setEnabled(False)
         layout.addWidget(self.slider)
 
@@ -628,8 +629,24 @@ class MainWindow(QMainWindow):
         if self.video_backend.cap:
             self.slider.set_total_frames(self.video_backend.total_frames)
             self.slider.set_segments(self._build_stamp_segments())
+            if self.annotation_data:
+                self.slider.set_boundaries(self.annotation_data.timestamps)
+            else:
+                self.slider.set_boundaries([])
         else:
             self.slider.set_segments([])
+            self.slider.set_boundaries([])
+
+    def on_boundary_changed(self, index, frame):
+        if not self.annotation_data:
+            return
+        times = self.annotation_data.timestamps
+        if index <= 0 or index >= len(times) - 1:
+            return
+        times[index] = frame
+        self._refresh_stamp_slider()
+        self.update_ui_state()
+        self.show_frame(frame)
 
     def on_slider_changed(self, value):
         if not self.is_updating_slider:
