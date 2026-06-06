@@ -1,5 +1,4 @@
 import csv
-import json
 import os
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -17,17 +16,11 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from data_model import (
-    MIN_SEGMENT_FRAMES,
-    AnnotationData,
-    clamp_insert_frame,
-    clamp_stamp_frame,
-)
+from data_model import AnnotationData
 from remote_dialogs import FileBrowserDialog, RangeInputDialog
 from reorder_dialog import ReorderDialog
 from video_backend import VideoBackend
@@ -219,12 +212,9 @@ class MainWindow(QMainWindow):
         self.word_pool = []
         self.load_word_pool()
 
-        self._gloss_color_map = {}
-
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._preview_tick)
         self._preview_end_frame = 0
-        self._syncing_selection = False
 
         self.init_ui()
 
@@ -292,10 +282,11 @@ class MainWindow(QMainWindow):
         video_container_layout.addWidget(self.video_label)
 
         self.next_gloss_overlay = QLabel(self.video_container)
+        self.next_gloss_overlay.setText("")
         self.next_gloss_overlay.setStyleSheet(
             "QLabel {"
             "  background: transparent;"
-            "  color: rgba(255, 224, 130, 0.5);"
+            "  color: rgba(255, 224, 130, 0.45);"
             "  font-size: 52px;"
             "  font-weight: bold;"
             "  padding: 0;"
@@ -314,11 +305,10 @@ class MainWindow(QMainWindow):
         self.slider = VideoTransport()
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.boundaryChanged.connect(self.on_boundary_changed)
-        self.slider.glossOrderMoved.connect(self.on_gloss_order_moved)
+        self.slider.glossesSwapped.connect(self.on_glosses_swapped)
         self.slider.segmentContextMenuRequested.connect(
             self.on_segment_context_menu
         )
-        self.slider.stampSelectionChanged.connect(self.on_stamp_selection_changed)
         self.slider.setEnabled(False)
         layout.addWidget(self.slider)
 
@@ -352,7 +342,27 @@ class MainWindow(QMainWindow):
         self.exchange_btn.clicked.connect(self.quick_exchange_gloss)
         gloss_layout.addWidget(self.exchange_btn)
 
+        self.edit_struct_btn = QPushButton("📝 Edit List")
+        self.edit_struct_btn.setStyleSheet(
+            "background-color: #9c27b0; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.edit_struct_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.edit_struct_btn.setEnabled(False)
+        self.edit_struct_btn.setFixedHeight(35)
+        self.edit_struct_btn.clicked.connect(self.edit_structure)
+        gloss_layout.addWidget(self.edit_struct_btn)
+
         gloss_layout.addStretch()
+
+        self.skip_btn = QPushButton("⏭ Do Later")
+        self.skip_btn.setStyleSheet(
+            "background-color: #f0ad4e; color: black; font-weight: bold; padding: 5px;"
+        )
+        self.skip_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.skip_btn.setEnabled(False)
+        self.skip_btn.setFixedHeight(35)
+        self.skip_btn.clicked.connect(self.skip_video)
+        gloss_layout.addWidget(self.skip_btn)
 
         self.save_btn = QPushButton("💾 Save Video")
         self.save_btn.setStyleSheet(
@@ -364,52 +374,17 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.manual_save)
         gloss_layout.addWidget(self.save_btn)
 
-        self.tools_btn = QToolButton()
-        self.tools_btn.setText("⚙")
-        self.tools_btn.setToolTip("More actions")
-        self.tools_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.tools_btn.setStyleSheet(
-            "QToolButton {"
-            "  background-color: #555;"
-            "  color: white;"
-            "  font-size: 18px;"
-            "  font-weight: bold;"
-            "  border: none;"
-            "  border-radius: 4px;"
-            "}"
-            "QToolButton:disabled { background-color: #3a3a3a; color: #888; }"
-            "QToolButton::menu-indicator { image: none; }"
-        )
-        self.tools_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.tools_btn.setEnabled(False)
-        self.tools_btn.setFixedSize(35, 35)
-        self._tools_menu = QMenu(self)
-        self._tools_menu.setStyleSheet(self._context_menu_style())
-        self._action_edit_list = self._tools_menu.addAction("Edit List")
-        self._action_do_later = self._tools_menu.addAction("Do Later")
-        self._action_reset = self._tools_menu.addAction("Reset")
-        self._action_preview_json = self._tools_menu.addAction("Preview JSON")
-        self._action_edit_list.triggered.connect(self.edit_structure)
-        self._action_do_later.triggered.connect(self.skip_video)
-        self._action_reset.triggered.connect(self.reset_annotation_progress)
-        self._action_preview_json.triggered.connect(self.preview_json)
-        self.tools_btn.setMenu(self._tools_menu)
-        gloss_layout.addWidget(self.tools_btn)
-
         layout.addLayout(gloss_layout)
 
         history_layout = QVBoxLayout()
         history_layout.addWidget(
-            QLabel(
-                "Recorded Timestamps (synced with timeline selection; Delete to remove)"
-            )
+            QLabel("Recorded Timestamps (Click to select, press Delete to remove):")
         )
 
         self.history_list = QListWidget()
         self.history_list.setMaximumHeight(120)
         self.history_list.setStyleSheet("background-color: #444; color: white;")
         self.history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.history_list.currentRowChanged.connect(self.on_history_row_changed)
         history_layout.addWidget(self.history_list)
 
         self.delete_btn = QPushButton("Delete Selected Timestamp")
@@ -421,6 +396,25 @@ class MainWindow(QMainWindow):
         history_layout.addWidget(self.delete_btn)
 
         layout.addLayout(history_layout)
+
+    def _position_next_gloss_overlay(self):
+        self.next_gloss_overlay.adjustSize()
+        x = max(0, (self.video_container.width() - self.next_gloss_overlay.width()) // 2)
+        self.next_gloss_overlay.move(x, 4)
+        self.next_gloss_overlay.raise_()
+
+    def update_next_gloss_overlay(self):
+        if not self.annotation_data or self.annotation_data.is_complete():
+            self.next_gloss_overlay.hide()
+            return
+
+        word = self.gloss_combo.currentText()
+        if word:
+            self.next_gloss_overlay.setText(word)
+            self._position_next_gloss_overlay()
+            self.next_gloss_overlay.show()
+        else:
+            self.next_gloss_overlay.hide()
 
     def cleanup_temp_video(self):
         if self.video_backend.cap:
@@ -437,29 +431,7 @@ class MainWindow(QMainWindow):
         if self._preview_timer.isActive():
             self._preview_timer.stop()
 
-    def _position_next_gloss_overlay(self):
-        self.next_gloss_overlay.adjustSize()
-        x = max(
-            0,
-            (self.video_container.width() - self.next_gloss_overlay.width()) // 2,
-        )
-        self.next_gloss_overlay.move(x, 6)
-        self.next_gloss_overlay.raise_()
-
-    def update_next_gloss_overlay(self):
-        if not self.annotation_data or self.annotation_data.is_complete():
-            self.next_gloss_overlay.hide()
-            return
-        word = self.gloss_combo.currentText()
-        if word:
-            self.next_gloss_overlay.setText(word)
-            self._position_next_gloss_overlay()
-            self.next_gloss_overlay.show()
-        else:
-            self.next_gloss_overlay.hide()
-
     def reset_annotation_ui(self):
-        self._gloss_color_map = {}
         self.stop_gloss_preview()
         self.cleanup_temp_video()
         self.annotation_data = None
@@ -472,8 +444,9 @@ class MainWindow(QMainWindow):
         self.gloss_combo.clear()
         self.gloss_combo.setEnabled(False)
         self.exchange_btn.setEnabled(False)
+        self.edit_struct_btn.setEnabled(False)
+        self.skip_btn.setEnabled(False)
         self.reject_btn.setEnabled(False)
-        self._update_tools_menu_state()
         self.save_btn.setEnabled(False)
         self.history_list.clear()
 
@@ -551,18 +524,19 @@ class MainWindow(QMainWindow):
 
     def on_download_success(self, temp_video, annotation_data, is_writable):
         self.set_buttons_enabled(True)
+        self.skip_btn.setEnabled(True)
+
         self.current_is_writable = is_writable
         self.reject_btn.setEnabled(is_writable)
         self.save_btn.setEnabled(is_writable)
 
         if self.word_pool and is_writable:
             self.exchange_btn.setEnabled(True)
-        self._update_tools_menu_state()
+            self.edit_struct_btn.setEnabled(True)
 
         self.current_temp_video = temp_video
         self.video_backend.load(self.current_temp_video)
         self.annotation_data = annotation_data
-        self._assign_gloss_colors()
 
         self.slider.setEnabled(True)
         self.slider.setMinimum(0)
@@ -625,13 +599,14 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+            if self.next_gloss_overlay.isVisible():
+                self._position_next_gloss_overlay()
+
             self.is_updating_slider = True
             self.slider.setValue(frame_idx)
             self.is_updating_slider = False
             self._refresh_stamp_slider()
-
-            if self.next_gloss_overlay.isVisible():
-                self._position_next_gloss_overlay()
+            self.update_next_gloss_overlay()
 
             if self.current_dataset:
                 dot = "🟢" if self.current_is_writable else "🔴"
@@ -643,24 +618,23 @@ class MainWindow(QMainWindow):
 
             self.status_label.setText(text)
 
-    def _assign_gloss_colors(self):
-        """Assign one of 16 palette indices per gloss name when the video loads."""
-        self._gloss_color_map = {}
+    def _gloss_color_map(self):
+        """Stable color index per gloss string for this sentence (not timeline position)."""
         if not self.annotation_data:
-            return
-        next_idx = 0
+            return {}
+        mapping = {}
+        idx = 0
         for gloss in self.annotation_data.original_glosses:
             if gloss == "EoR":
                 continue
-            if gloss not in self._gloss_color_map:
-                self._gloss_color_map[gloss] = next_idx % 16
-                next_idx += 1
-
-    def _ensure_gloss_color(self, gloss):
-        if not gloss or gloss == "EoR":
-            return
-        if gloss not in self._gloss_color_map:
-            self._gloss_color_map[gloss] = len(self._gloss_color_map) % 16
+            if gloss not in mapping:
+                mapping[gloss] = idx
+                idx += 1
+        for gloss in self.annotation_data.recorded_glosses:
+            if gloss not in mapping:
+                mapping[gloss] = idx
+                idx += 1
+        return mapping
 
     def _build_stamp_segments(self):
         if not self.annotation_data:
@@ -668,108 +642,29 @@ class MainWindow(QMainWindow):
         glosses = self.annotation_data.recorded_glosses
         times = self.annotation_data.timestamps
         playhead = self.video_backend.current_frame_idx
-        max_frame = self.video_backend.total_frames - 1
         segments = []
 
         if not times:
             return []
 
         for i, (gloss, start) in enumerate(zip(glosses, times)):
-            if gloss == "EoR":
-                continue
             if i + 1 < len(times):
                 end = times[i + 1]
             else:
                 end = playhead
-            end = max(end, start + MIN_SEGMENT_FRAMES)
-            end = min(end, max_frame)
-            if end <= start:
-                end = min(max_frame, start + MIN_SEGMENT_FRAMES)
-            segments.append((gloss, start, end, i, False))
+            if end > start:
+                segments.append((gloss, start, end))
 
         return segments
-
-    def _pending_original_indices(self):
-        if not self.annotation_data:
-            return []
-        original = self.annotation_data.original_glosses
-        recorded_n = len(self.annotation_data.recorded_glosses)
-        eor_i = self._eor_original_index()
-        return [
-            i
-            for i in range(recorded_n, eor_i if eor_i >= 0 else len(original))
-            if original[i] != "EoR"
-        ]
-
-    def _planned_timeline_range(self, max_frame):
-        playhead = self.video_backend.current_frame_idx
-        range_start = min(max_frame, playhead)
-        if self.annotation_data and self.annotation_data.timestamps:
-            after_last = min(
-                max_frame,
-                max(self.annotation_data.timestamps) + MIN_SEGMENT_FRAMES,
-            )
-            range_start = max(range_start, after_last)
-        return range_start, max_frame
-
-    def _build_planned_segments(self):
-        if not self.annotation_data:
-            return []
-        original = self.annotation_data.original_glosses
-        max_frame = self.video_backend.total_frames - 1
-        pending = self._pending_original_indices()
-        if not pending:
-            return []
-
-        range_start, range_end = self._planned_timeline_range(max_frame)
-        if range_start > range_end:
-            return []
-
-        slot_count = len(pending)
-        span = range_end - range_start + 1
-        slot_width = max(1, span // slot_count)
-
-        segments = []
-        for slot_i, orig_i in enumerate(pending):
-            start = range_start + slot_i * slot_width
-            if slot_i == slot_count - 1:
-                end = range_end
-            else:
-                end = range_start + (slot_i + 1) * slot_width - 1
-            if start > range_end:
-                break
-            segments.append((original[orig_i], start, end, orig_i, True))
-        return segments
-
-    def _eor_original_index(self):
-        if not self.annotation_data:
-            return -1
-        return self.annotation_data._eor_original_index()
 
     def _refresh_stamp_slider(self):
         if not isinstance(self.slider, VideoTransport):
             return
         if self.video_backend.cap:
-            if self.annotation_data:
-                self.annotation_data.repair_timestamps(
-                    self.video_backend.total_frames - 1
-                )
-                eor_i = self.annotation_data.eor_index()
-                self.slider.set_eor_stamp_index(
-                    eor_i if eor_i is not None else -1
-                )
-            else:
-                self.slider.set_eor_stamp_index(-1)
             self.slider.set_total_frames(self.video_backend.total_frames)
-            self.slider.set_gloss_colors(self._gloss_color_map)
-            planned = self._build_planned_segments()
-            recorded = self._build_stamp_segments()
-            self.slider.set_segments(planned + recorded)
+            self.slider.set_gloss_colors(self._gloss_color_map())
+            self.slider.set_segments(self._build_stamp_segments())
             if self.annotation_data:
-                recorded_n = len(self.annotation_data.recorded_glosses)
-                eor_orig = self._eor_original_index()
-                last_movable = eor_orig - 1 if eor_orig > 0 else -1
-                self.slider.set_planned_move_range(recorded_n, last_movable)
                 self.slider.set_boundaries(self.annotation_data.timestamps)
             else:
                 self.slider.set_boundaries([])
@@ -784,8 +679,13 @@ class MainWindow(QMainWindow):
         times = self.annotation_data.timestamps
         if index < 0 or index >= len(times):
             return
-        max_frame = self.video_backend.total_frames - 1
-        times[index] = clamp_stamp_frame(times, index, frame, max_frame)
+        lo = times[index - 1] + 1 if index > 0 else 0
+        hi = (
+            times[index + 1] - 1
+            if index + 1 < len(times)
+            else self.video_backend.total_frames - 1
+        )
+        times[index] = max(lo, min(hi, frame))
         self._refresh_stamp_slider()
         self.update_ui_state()
         self.show_frame(frame)
@@ -793,11 +693,8 @@ class MainWindow(QMainWindow):
     def _segment_frame_range(self, segment_index):
         if not self.annotation_data:
             return None
-        glosses = self.annotation_data.recorded_glosses
         times = self.annotation_data.timestamps
         if segment_index < 0 or segment_index >= len(times):
-            return None
-        if glosses[segment_index] == "EoR":
             return None
         start = times[segment_index]
         if segment_index + 1 < len(times):
@@ -832,63 +729,14 @@ class MainWindow(QMainWindow):
             return
         self.show_frame(idx + 1)
 
-    def on_gloss_order_moved(self, from_index, to_index):
+    def on_glosses_swapped(self, i, j):
         if not self.annotation_data:
             return
-        self.annotation_data.move_gloss_in_order(from_index, to_index)
-        self._sync_gloss_combo()
+        glosses = self.annotation_data.recorded_glosses
+        if 0 <= i < len(glosses) and 0 <= j < len(glosses):
+            glosses[i], glosses[j] = glosses[j], glosses[i]
         self._refresh_stamp_slider()
         self.update_ui_state()
-
-    def _sync_gloss_combo(self):
-        if not self.annotation_data:
-            return
-        next_idx = len(self.annotation_data.recorded_glosses)
-        self.gloss_combo.blockSignals(True)
-        self.gloss_combo.clear()
-        self.gloss_combo.addItems(self.annotation_data.original_glosses)
-        if next_idx < self.gloss_combo.count():
-            self.gloss_combo.setCurrentIndex(next_idx)
-        self.gloss_combo.blockSignals(False)
-        self.update_next_gloss_overlay()
-
-    def _update_tools_menu_state(self):
-        has_data = self.annotation_data is not None
-        writable = self.current_is_writable
-        self.tools_btn.setEnabled(has_data)
-        self._action_do_later.setEnabled(has_data)
-        self._action_preview_json.setEnabled(has_data)
-        self._action_edit_list.setEnabled(
-            has_data and writable and bool(self.word_pool)
-        )
-        self._action_reset.setEnabled(has_data and writable)
-
-    def preview_json(self):
-        if not self.annotation_data:
-            return
-
-        preview_data = dict(self.annotation_data.data)
-        if (
-            self.annotation_data.recorded_glosses
-            and self.annotation_data.timestamps
-        ):
-            preview_data["glosses"] = [
-                [g, t]
-                for g, t in zip(
-                    self.annotation_data.recorded_glosses,
-                    self.annotation_data.timestamps,
-                )
-            ]
-        else:
-            preview_data["glosses"] = list(self.annotation_data.original_glosses)
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("JSON Preview")
-        msg.setText(
-            f"<pre>{json.dumps(preview_data, indent=4, ensure_ascii=False)}</pre>"
-        )
-        msg.exec()
-        self.setFocus()
 
     def _context_menu_style(self):
         return """
@@ -914,44 +762,8 @@ class MainWindow(QMainWindow):
             }
         """
 
-    def on_segment_context_menu(
-        self, segment_index, is_planned, frame, global_pos
-    ):
+    def on_segment_context_menu(self, segment_index, frame, global_pos):
         if not self.annotation_data:
-            return
-
-        menu = QMenu(self)
-        menu.setStyleSheet(self._context_menu_style())
-
-        if is_planned:
-            selected = self.slider.selected_planned_index()
-            is_selected_target = (
-                selected is not None
-                and segment_index >= 0
-                and segment_index == selected
-            )
-            if is_selected_target:
-                delete_action = menu.addAction("Delete gloss")
-                replace_action = menu.addAction("Replace")
-                if not self.current_is_writable:
-                    delete_action.setEnabled(False)
-                    replace_action.setEnabled(False)
-                chosen = menu.exec(global_pos)
-                if chosen is None:
-                    return
-                if chosen == delete_action:
-                    self._delete_planned_gloss(segment_index)
-                elif chosen == replace_action:
-                    self._replace_planned_gloss(segment_index)
-            else:
-                add_action = menu.addAction("Add gloss")
-                if not self.current_is_writable:
-                    add_action.setEnabled(False)
-                chosen = menu.exec(global_pos)
-                if chosen is None:
-                    return
-                if chosen == add_action:
-                    self._add_planned_gloss(segment_index)
             return
 
         selected = self.slider.selected_segment()
@@ -960,6 +772,9 @@ class MainWindow(QMainWindow):
             and segment_index >= 0
             and segment_index == selected
         )
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_style())
 
         if is_selected_target:
             delete_action = menu.addAction("Delete gloss")
@@ -995,50 +810,6 @@ class MainWindow(QMainWindow):
                 return i
         return len(times)
 
-    def _add_planned_gloss(self, original_index):
-        if not self.annotation_data or not self.word_pool:
-            return
-        dialog = ExchangeDialog(self.word_pool, self)
-        dialog.setWindowTitle("Add gloss")
-        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_word:
-            return
-        insert_at = (
-            original_index + 1
-            if original_index >= 0
-            else len(self.annotation_data.recorded_glosses)
-        )
-        self.annotation_data.insert_original_gloss(insert_at, dialog.selected_word)
-        self._ensure_gloss_color(dialog.selected_word)
-        self._sync_gloss_combo()
-        self._refresh_stamp_slider()
-        self.update_ui_state()
-        self.setFocus()
-
-    def _delete_planned_gloss(self, original_index):
-        if not self.annotation_data:
-            return
-        self.annotation_data.delete_original_gloss(original_index)
-        self.slider.clear_segment_selection()
-        self._sync_gloss_combo()
-        self._refresh_stamp_slider()
-        self.update_ui_state()
-
-    def _replace_planned_gloss(self, original_index):
-        if not self.annotation_data or not self.word_pool:
-            return
-        dialog = ExchangeDialog(self.word_pool, self)
-        dialog.setWindowTitle("Replace gloss")
-        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_word:
-            return
-        self.annotation_data.replace_original_gloss(
-            original_index, dialog.selected_word
-        )
-        self._ensure_gloss_color(dialog.selected_word)
-        self._sync_gloss_combo()
-        self._refresh_stamp_slider()
-        self.update_ui_state()
-        self.setFocus()
-
     def _add_gloss(self, segment_index, frame):
         if not self.annotation_data or not self.word_pool:
             return
@@ -1053,27 +824,22 @@ class MainWindow(QMainWindow):
 
         if segment_index >= 0 and segment_index < len(times):
             insert_at = segment_index + 1
+            lo = times[segment_index] + 1
+            hi = (
+                times[insert_at] - 1
+                if insert_at < len(times)
+                else max_frame
+            )
         else:
             insert_at = self._insert_index_for_frame(frame)
+            lo = times[insert_at - 1] + 1 if insert_at > 0 else 0
+            hi = times[insert_at] - 1 if insert_at < len(times) else max_frame
 
-        eor_i = self.annotation_data.eor_index()
-        if eor_i is not None:
-            insert_at = min(insert_at, eor_i)
-
-        clamped = clamp_insert_frame(times, insert_at, frame, max_frame)
-        if clamped is None:
-            QMessageBox.warning(
-                self,
-                "Cannot add gloss",
-                "Not enough space between stamps for a visible segment.",
-            )
-            return
-        frame = clamped
+        frame = max(lo, min(hi, frame))
 
         self.annotation_data.insert_timestamp(
             insert_at, dialog.selected_word, frame
         )
-        self._ensure_gloss_color(dialog.selected_word)
         self._refresh_stamp_slider()
         self.update_ui_state()
         self.show_frame(frame)
@@ -1085,8 +851,6 @@ class MainWindow(QMainWindow):
             self.annotation_data.recorded_glosses
         ):
             return
-        if self.annotation_data.recorded_glosses[segment_index] == "EoR":
-            return
 
         dialog = ExchangeDialog(self.word_pool, self)
         dialog.setWindowTitle("Replace gloss")
@@ -1094,7 +858,6 @@ class MainWindow(QMainWindow):
             return
 
         self.annotation_data.recorded_glosses[segment_index] = dialog.selected_word
-        self._ensure_gloss_color(dialog.selected_word)
         self._refresh_stamp_slider()
         self.update_ui_state()
         self.setFocus()
@@ -1105,8 +868,6 @@ class MainWindow(QMainWindow):
         if segment_index < 0 or segment_index >= len(
             self.annotation_data.timestamps
         ):
-            return
-        if self.annotation_data.recorded_glosses[segment_index] == "EoR":
             return
 
         deleted_gloss = self.annotation_data.recorded_glosses[segment_index]
@@ -1141,35 +902,7 @@ class MainWindow(QMainWindow):
 
             self.gloss_combo.setItemText(current_idx, new_word)
             self.annotation_data.original_glosses[current_idx] = new_word
-            self._ensure_gloss_color(new_word)
 
-        self.setFocus()
-
-    def reset_annotation_progress(self):
-        if not self.annotation_data or not self.current_is_writable:
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Reset annotation",
-            "Restore the original gloss list from when this video was opened "
-            "and delete all recorded stamps?\n\n"
-            "Timeline edits (swap, replace, add) will also be undone. "
-            "Nothing is saved to the server until you save the video.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        self.stop_gloss_preview()
-        self.annotation_data.reset_to_factory()
-        self.gloss_combo.clear()
-        self.gloss_combo.addItems(self.annotation_data.original_glosses)
-        self.gloss_combo.setCurrentIndex(0)
-        self.gloss_combo.setEnabled(True)
-        self.slider.clear_segment_selection()
-        self.update_ui_state()
         self.setFocus()
 
     def edit_structure(self):
@@ -1238,20 +971,13 @@ class MainWindow(QMainWindow):
         current_frame = self.video_backend.current_frame_idx
         selected_gloss = self.gloss_combo.currentText()
 
-        max_frame = self.video_backend.total_frames - 1
-        self.annotation_data.add_timestamp(
-            selected_gloss, current_frame, max_frame
-        )
+        self.annotation_data.add_timestamp(selected_gloss, current_frame)
 
         next_index = self.gloss_combo.currentIndex() + 1
         if next_index < self.gloss_combo.count():
             self.gloss_combo.setCurrentIndex(next_index)
 
         self.update_ui_state()
-        if self.history_list.count() > 0:
-            self._syncing_selection = True
-            self.history_list.setCurrentRow(self.history_list.count() - 1)
-            self._syncing_selection = False
 
         if self.annotation_data.is_complete():
             valid, msg = self.validate_save_conditions()
@@ -1264,53 +990,19 @@ class MainWindow(QMainWindow):
                     f"All glosses recorded, but cannot save yet:\n\n{msg}\n\nPlease fix your history list (Delete) to proceed.",
                 )
 
-    def _selected_stamp_index(self):
-        stamp_idx = self.slider.selected_segment()
-        if stamp_idx is not None:
-            return stamp_idx
-        row = self.history_list.currentRow()
-        return row if row >= 0 else None
-
-    def on_stamp_selection_changed(self, stamp_idx):
-        if self._syncing_selection:
-            return
-        self._syncing_selection = True
-        if stamp_idx < 0:
-            self.history_list.clearSelection()
-        elif stamp_idx < self.history_list.count():
-            self.history_list.setCurrentRow(stamp_idx)
-        self._syncing_selection = False
-
-    def on_history_row_changed(self, row):
-        if self._syncing_selection or not self.annotation_data:
-            return
-        if row < 0 or row >= len(self.annotation_data.timestamps):
-            return
-        self._syncing_selection = True
-        self.slider.set_selected_segment(row)
-        self._syncing_selection = False
-
     def delete_selected_timestamp(self):
         if not self.annotation_data:
             return
-        stamp_idx = self._selected_stamp_index()
-        if stamp_idx is None:
-            return
-        if self.annotation_data.recorded_glosses[stamp_idx] == "EoR":
-            return
+        current_row = self.history_list.currentRow()
+        if current_row >= 0:
+            deleted_gloss = self.annotation_data.recorded_glosses[current_row]
+            self.annotation_data.delete_timestamp(current_row)
 
-        deleted_gloss = self.annotation_data.recorded_glosses[stamp_idx]
-        self.annotation_data.delete_timestamp(stamp_idx)
+            idx = self.gloss_combo.findText(deleted_gloss)
+            if idx >= 0:
+                self.gloss_combo.setCurrentIndex(idx)
 
-        idx = self.gloss_combo.findText(deleted_gloss)
-        if idx >= 0:
-            self.gloss_combo.setCurrentIndex(idx)
-
-        self.slider.clear_segment_selection()
-        self._syncing_selection = True
-        self.history_list.clearSelection()
-        self._syncing_selection = False
-        self.update_ui_state()
+            self.update_ui_state()
 
     def update_ui_state(self):
         if not self.annotation_data:
@@ -1326,24 +1018,17 @@ class MainWindow(QMainWindow):
             if self.word_pool and self.current_is_writable:
                 self.exchange_btn.setEnabled(True)
 
-        stamp_sel = self.slider.selected_segment()
         self.history_list.clear()
         for g, t in zip(
             self.annotation_data.recorded_glosses, self.annotation_data.timestamps
         ):
             self.history_list.addItem(f"{g} (Frame: {t})")
 
-        if (
-            stamp_sel is not None
-            and 0 <= stamp_sel < self.history_list.count()
-        ):
-            self._syncing_selection = True
-            self.history_list.setCurrentRow(stamp_sel)
-            self._syncing_selection = False
+        if self.history_list.count() > 0:
+            self.history_list.setCurrentRow(self.history_list.count() - 1)
 
-        self._refresh_stamp_slider()
-        self._update_tools_menu_state()
         self.update_next_gloss_overlay()
+        self._refresh_stamp_slider()
 
     def reject_video(self):
         if not self.annotation_data or not self.current_dataset:
