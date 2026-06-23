@@ -1,50 +1,36 @@
-# Welcome to your Expo app 👋
+# PJMatch: Dataset Recorder
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A dedicated React Native (Expo) mobile application built for recording the Polish Sign Language (PJM) dataset. 
 
-## Get started
+This application was created to streamline the recording process for actors and ensure data privacy. It sends video files directly to a secure server, completely bypassing the device's local storage and gallery.
 
-1. Install dependencies
+## Key Features
 
+- **Direct Server Upload:** Videos and paired `.json` metadata files are generated on the fly and sent straight to the server.
+- **Background Upload Queue:** Record continuously without waiting. Uploads are queued in the background, allowing uninterrupted work even on slow network connections.
+- **Bluetooth Remote Support:** Navigate and record hands-free to eliminate camera shake on the tripod.
+- **Auto-Next:** The app automatically advances to the next sentence in the database pool after a successful recording.
+
+## Getting Started
+
+### Prerequisites
+Make sure you have Node.js and npm installed on your machine.
+
+### Installation & Running Locally
+
+1. Install dependencies:
    ```bash
    npm install
    ```
 
-2. Start the app
-
+2. Start the Expo development server:
    ```bash
    npx expo start
    ```
 
-In the output, you'll find options to open the app in a
+### Important Note on Permissions
+If you are building the APK or running the app on a physical Android device, the app **does not automatically prompt for camera permissions**. Before using the app, you must go to your phone's **Settings -> Apps -> Dataset Recorder -> Permissions** and manually grant **Camera** access. The app will not function without this step.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## Built With
+- [React Native](https://reactnative.dev/)
+- [Expo](https://expo.dev/)
