@@ -1,8 +1,7 @@
+import fnmatch
 import json
 import os
 import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
 
@@ -31,11 +30,16 @@ class SSHManager:
             raise Exception(f"Could not read directory {remote_dir}. Does it exist?")
 
         files_set = set(files)
-        mp4_files = [f for f in files if f.endswith(".mp4")]
+        pattern = (
+            f"{target_person_id}_*.mp4"
+            if target_person_id is not None
+            else "*.mp4"
+        )
+        mp4_files = [f for f in files if fnmatch.fnmatch(f, pattern)]
 
         for mp4 in mp4_files:
             try:
-                parts = mp4.split("_")
+                parts = mp4[:-4].split("_")
                 if len(parts) >= 2:
                     person_id = int(parts[0])
                     sentence_id = int(parts[1])
@@ -44,8 +48,6 @@ class SSHManager:
             except ValueError:
                 continue
 
-            if target_person_id is not None and person_id != target_person_id:
-                continue
             if min_id is not None and sentence_id < min_id:
                 continue
             if max_id is not None and sentence_id > max_id:

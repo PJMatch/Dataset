@@ -48,11 +48,13 @@ class LoginDialog(QDialog):
 class RangeInputDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Filter by Sentence ID")
+        self.setWindowTitle("Filter by Sentence ID (Person 6)")
         layout = QVBoxLayout(self)
 
         layout.addWidget(
-            QLabel("Filter files by Sentence ID.\nLeave blank to load all files.")
+            QLabel(
+                "Filter Person 6 files by Sentence ID.\nLeave blank to load all files."
+            )
         )
 
         row = QHBoxLayout()

@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
         self.target_person_id = 6
         self.dataset_cache = {}
         self.current_dataset = None
-        self.last_query_key = f"person_{self.target_person_id}"
+        self.last_query_key = None
         self.current_is_writable = True
 
         self.word_pool = []
@@ -231,7 +231,7 @@ class MainWindow(QMainWindow):
         self._syncing_selection = False
 
         self.init_ui()
-        QTimer.singleShot(100, self.fetch_datasets)
+        QTimer.singleShot(100, self.browse_remote)
 
     def load_word_pool(self):
         if os.path.exists("word_pool.csv"):
@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central_widget)
 
         top_bar = QHBoxLayout()
-        self.browse_btn = QPushButton("Refresh List")
+        self.browse_btn = QPushButton("Fetch New Range")
         self.browse_btn.setStyleSheet(
             "background-color: #444; color: white; padding: 5px; font-weight: bold;"
         )
@@ -268,9 +268,7 @@ class MainWindow(QMainWindow):
         self.cached_list_btn.clicked.connect(self.show_cached_list)
         top_bar.addWidget(self.cached_list_btn)
 
-        self.status_label = QLabel(
-            f"Fetching video list for Person {self.target_person_id} from server..."
-        )
+        self.status_label = QLabel("Connected. Please fetch a range.")
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
 
@@ -495,24 +493,39 @@ class MainWindow(QMainWindow):
         else:
             self.cached_list_btn.setEnabled(False)
 
-    def fetch_datasets(self, person_id=None):
-        if person_id is None:
-            person_id = self.target_person_id
-        self.target_person_id = person_id
-        self.last_query_key = f"person_{person_id}"
+    def browse_remote(self):
+        range_dialog = RangeInputDialog(self)
+        if range_dialog.exec() == QDialog.DialogCode.Accepted:
+            min_id, max_id = range_dialog.get_range()
+        else:
+            if not self.current_dataset:
+                self.status_label.setText(
+                    "Please click 'Fetch New Range' to select videos."
+                )
+            return
+
+        self.last_query_key = (self.target_person_id, min_id, max_id)
+        if self.last_query_key in self.dataset_cache:
+            self.on_fetch_success(
+                self.dataset_cache[self.last_query_key], from_cache=True
+            )
+            return
 
         self.set_buttons_enabled(False)
+        range_str = f"[{min_id if min_id is not None else 'start'} - {max_id if max_id is not None else 'end'}]"
         self.status_label.setText(
-            f"Fetching video list for Person {person_id} from server (this may take a moment)..."
+            f"Fetching Person {self.target_person_id} videos {range_str} from server..."
         )
 
-        self.fetch_worker = FetchListWorker(self.ssh_manager, person_id=person_id)
+        self.fetch_worker = FetchListWorker(
+            self.ssh_manager,
+            person_id=self.target_person_id,
+            min_id=min_id,
+            max_id=max_id,
+        )
         self.fetch_worker.finished.connect(self.on_fetch_success)
         self.fetch_worker.error.connect(self.on_fetch_error)
         self.fetch_worker.start()
-
-    def browse_remote(self):
-        self.fetch_datasets(self.target_person_id)
 
     def show_cached_list(self):
         if self.last_query_key in self.dataset_cache:
@@ -528,12 +541,12 @@ class MainWindow(QMainWindow):
 
         if not datasets:
             self.status_label.setText(
-                f"No videos found for Person {self.target_person_id}."
+                "No videos found matching criteria."
             )
             QMessageBox.information(
                 self,
                 "No Videos",
-                f"No videos found for Person {self.target_person_id}.",
+                f"No videos found for Person {self.target_person_id} matching criteria.",
             )
             return
 
@@ -638,12 +651,12 @@ class MainWindow(QMainWindow):
             self.load_dataset(next_dataset)
         else:
             self.status_label.setText(
-                f"Finished all videos for Person {self.target_person_id}!"
+                "Finished the current batch! Please fetch a new range."
             )
             QMessageBox.information(
                 self,
                 "Finished",
-                f"All videos for Person {self.target_person_id} in the current list are complete!",
+                "All videos in the current range are complete!",
             )
 
     def show_frame(self, frame_idx):
