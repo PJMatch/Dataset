@@ -21,7 +21,7 @@ class LoginDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.host_input = QLineEdit()
-        self.host_input.setText("172.20.18.209")
+        self.host_input.setText("172.20.3.204")
         self.host_input.setPlaceholderText("IP Address")
         layout.addWidget(QLabel("Host IP:"))
         layout.addWidget(self.host_input)
