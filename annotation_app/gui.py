@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -230,6 +232,10 @@ class MainWindow(QMainWindow):
         self._preview_end_frame = 0
         self._syncing_selection = False
 
+        self.is_playing = False
+        self._playback_timer = QTimer(self)
+        self._playback_timer.timeout.connect(self._playback_tick)
+
         self.init_ui()
         QTimer.singleShot(100, self.browse_remote)
 
@@ -272,19 +278,41 @@ class MainWindow(QMainWindow):
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
 
-        self.reject_btn = QPushButton("🗑 Reject Video")
-        self.reject_btn.setStyleSheet(
-            "background-color: #d9534f; color: white; font-weight: bold; padding: 5px;"
-        )
-        self.reject_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.reject_btn.setEnabled(False)
-        self.reject_btn.setFixedHeight(35)
-        self.reject_btn.clicked.connect(self.reject_video)
-        top_bar.addWidget(self.reject_btn)
-
         top_bar.addStretch()
         layout.addLayout(top_bar)
 
+        # Sentence Reference Card
+        self.sentence_card = QFrame()
+        self.sentence_card.setStyleSheet(
+            "QFrame {"
+            "  background-color: #383838;"
+            "  border: 1px solid #4a4a4a;"
+            "  border-radius: 6px;"
+            "  padding: 8px 14px;"
+            "}"
+        )
+        card_layout = QVBoxLayout(self.sentence_card)
+        card_layout.setContentsMargins(6, 6, 6, 6)
+        card_layout.setSpacing(4)
+
+        self.sentence_label = QLabel("Select a video to view reference signing.")
+        self.sentence_label.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: #ffffff;"
+        )
+        self.sentence_label.setWordWrap(True)
+        card_layout.addWidget(self.sentence_label)
+
+        self.glosses_ref_label = QLabel()
+        self.glosses_ref_label.setStyleSheet(
+            "font-size: 13px; color: #64b5f6; font-weight: bold;"
+        )
+        self.glosses_ref_label.setWordWrap(True)
+        self.glosses_ref_label.hide()
+        card_layout.addWidget(self.glosses_ref_label)
+
+        layout.addWidget(self.sentence_card)
+
+        # Video container
         self.video_container = QWidget()
         self.video_container.setMinimumSize(640, 360)
         self.video_container.setStyleSheet("background-color: black;")
@@ -316,6 +344,81 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.video_container, stretch=1)
 
+        # Reference Playback Controls Bar
+        self.playback_container = QWidget()
+        pb_layout = QHBoxLayout(self.playback_container)
+        pb_layout.setContentsMargins(0, 4, 0, 4)
+        pb_layout.setSpacing(8)
+
+        self.play_btn = QPushButton("▶ Play")
+        self.play_btn.setToolTip("Play / Pause (Space)")
+        self.play_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px; padding: 6px 14px; border-radius: 4px;"
+        )
+        self.play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.play_btn.setFixedHeight(34)
+        self.play_btn.setEnabled(False)
+        self.play_btn.clicked.connect(self.toggle_playback)
+        pb_layout.addWidget(self.play_btn)
+
+        self.step_back_btn = QPushButton("⏮ -1")
+        self.step_back_btn.setToolTip("Step 1 frame back (Left Arrow)")
+        self.step_back_btn.setStyleSheet(
+            "background-color: #444; color: white; font-weight: bold; padding: 6px 10px; border-radius: 4px;"
+        )
+        self.step_back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.step_back_btn.setFixedHeight(34)
+        self.step_back_btn.setEnabled(False)
+        self.step_back_btn.clicked.connect(lambda: self.step_frame(-1))
+        pb_layout.addWidget(self.step_back_btn)
+
+        self.step_fwd_btn = QPushButton("+1 ⏭")
+        self.step_fwd_btn.setToolTip("Step 1 frame forward (Right Arrow)")
+        self.step_fwd_btn.setStyleSheet(
+            "background-color: #444; color: white; font-weight: bold; padding: 6px 10px; border-radius: 4px;"
+        )
+        self.step_fwd_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.step_fwd_btn.setFixedHeight(34)
+        self.step_fwd_btn.setEnabled(False)
+        self.step_fwd_btn.clicked.connect(lambda: self.step_frame(1))
+        pb_layout.addWidget(self.step_fwd_btn)
+
+        self.playback_slider = QSlider(Qt.Orientation.Horizontal)
+        self.playback_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.playback_slider.setStyleSheet(
+            "QSlider::groove:horizontal { height: 8px; background: #444; border-radius: 4px; }"
+            "QSlider::sub-page:horizontal { background: #2196F3; border-radius: 4px; }"
+            "QSlider::handle:horizontal { background: #ffffff; width: 16px; margin-top: -4px; margin-bottom: -4px; border-radius: 8px; }"
+        )
+        self.playback_slider.setEnabled(False)
+        self.playback_slider.valueChanged.connect(self.on_playback_slider_changed)
+        pb_layout.addWidget(self.playback_slider, stretch=1)
+
+        self.time_label = QLabel("00:00.0 / 00:00.0 (Frame 0/0)")
+        self.time_label.setStyleSheet("color: #ccc; font-size: 13px; font-weight: bold;")
+        pb_layout.addWidget(self.time_label)
+
+        layout.addWidget(self.playback_container)
+
+        # Bottom Bar: Recording Module Placeholder Action Bar
+        bottom_action_bar = QHBoxLayout()
+        bottom_action_bar.addStretch()
+        self.record_btn = QPushButton("🎥 Record Your Video (Recording Module Coming Soon)")
+        self.record_btn.setStyleSheet(
+            "background-color: #383838; color: #888; font-size: 14px; font-weight: bold; padding: 8px 18px; border-radius: 4px; border: 1px dashed #555;"
+        )
+        self.record_btn.setEnabled(False)
+        self.record_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.record_btn.setToolTip("The recording module to record your own PJM signing video will be added here.")
+        bottom_action_bar.addWidget(self.record_btn)
+        bottom_action_bar.addStretch()
+        layout.addLayout(bottom_action_bar)
+
+        # Annotation Container (preserved for annotating newly recorded video)
+        self.annotation_container = QWidget()
+        ann_layout = QVBoxLayout(self.annotation_container)
+        ann_layout.setContentsMargins(0, 0, 0, 0)
+
         self.slider = VideoTransport()
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.boundaryChanged.connect(self.on_boundary_changed)
@@ -325,7 +428,7 @@ class MainWindow(QMainWindow):
         )
         self.slider.stampSelectionChanged.connect(self.on_stamp_selection_changed)
         self.slider.setEnabled(False)
-        layout.addWidget(self.slider)
+        ann_layout.addWidget(self.slider)
 
         gloss_layout = QHBoxLayout()
         self.gloss_label = QLabel("Gloss:")
@@ -401,7 +504,7 @@ class MainWindow(QMainWindow):
         self.tools_btn.setMenu(self._tools_menu)
         gloss_layout.addWidget(self.tools_btn)
 
-        layout.addLayout(gloss_layout)
+        ann_layout.addLayout(gloss_layout)
 
         history_layout = QVBoxLayout()
         history_layout.addWidget(
@@ -425,9 +528,62 @@ class MainWindow(QMainWindow):
         self.delete_btn.clicked.connect(self.delete_selected_timestamp)
         history_layout.addWidget(self.delete_btn)
 
-        layout.addLayout(history_layout)
+        ann_layout.addLayout(history_layout)
+
+        self.reject_btn = QPushButton("🗑 Reject Video")
+        self.reject_btn.setStyleSheet(
+            "background-color: #d9534f; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.reject_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.reject_btn.setEnabled(False)
+        self.reject_btn.setFixedHeight(35)
+        self.reject_btn.clicked.connect(self.reject_video)
+        ann_layout.addWidget(self.reject_btn)
+
+        # Hide annotation container in reference video mode
+        self.annotation_container.hide()
+        layout.addWidget(self.annotation_container)
+
+    def toggle_playback(self):
+        if not self.video_backend.cap:
+            return
+        if self.is_playing:
+            self.pause_video()
+        else:
+            self.play_video()
+
+    def play_video(self):
+        if not self.video_backend.cap:
+            return
+        if self.video_backend.current_frame_idx >= self.video_backend.total_frames - 1:
+            self.show_frame(0)
+        fps = self.video_backend.fps if self.video_backend.fps > 0 else 25.0
+        interval_ms = max(10, int(1000.0 / fps))
+        self._playback_timer.start(interval_ms)
+        self.is_playing = True
+        self.play_btn.setText("⏸ Pause")
+
+    def pause_video(self):
+        self._playback_timer.stop()
+        self.is_playing = False
+        self.play_btn.setText("▶ Play")
+
+    def _playback_tick(self):
+        if not self.video_backend.cap:
+            self.pause_video()
+            return
+        curr = self.video_backend.current_frame_idx
+        if curr + 1 >= self.video_backend.total_frames:
+            self.pause_video()
+            return
+        self.show_frame(curr + 1)
+
+    def on_playback_slider_changed(self, value):
+        if not self.is_updating_slider:
+            self.show_frame(value)
 
     def cleanup_temp_video(self):
+        self.pause_video()
         if self.video_backend.cap:
             self.video_backend.cap.release()
             self.video_backend.cap = None
@@ -452,6 +608,9 @@ class MainWindow(QMainWindow):
         self.next_gloss_overlay.raise_()
 
     def update_next_gloss_overlay(self):
+        if not self.annotation_container.isVisible():
+            self.next_gloss_overlay.hide()
+            return
         if not self.annotation_data or self.annotation_data.is_complete():
             self.next_gloss_overlay.hide()
             return
@@ -464,12 +623,23 @@ class MainWindow(QMainWindow):
             self.next_gloss_overlay.hide()
 
     def reset_annotation_ui(self):
+        self.pause_video()
         self._gloss_color_map = {}
         self.stop_gloss_preview()
         self.cleanup_temp_video()
         self.annotation_data = None
         self.video_label.clear()
         self.next_gloss_overlay.hide()
+        self.play_btn.setEnabled(False)
+        self.play_btn.setText("▶ Play")
+        self.step_back_btn.setEnabled(False)
+        self.step_fwd_btn.setEnabled(False)
+        self.playback_slider.setEnabled(False)
+        self.playback_slider.setValue(0)
+        self.time_label.setText("00:00.0 / 00:00.0 (Frame 0/0)")
+        self.sentence_label.setText("Select a video to view reference signing.")
+        self.glosses_ref_label.clear()
+        self.glosses_ref_label.hide()
         self.slider.setEnabled(False)
         self.slider.set_gloss_colors({})
         self.slider.set_segments([])
@@ -603,24 +773,46 @@ class MainWindow(QMainWindow):
         self.annotation_data = annotation_data
         self._assign_gloss_colors()
 
-        self.slider.setEnabled(True)
-        self.slider.setMinimum(0)
-        self.slider.setMaximum(self.video_backend.total_frames - 1)
-        self.slider.setValue(0)
-        self.slider.set_total_frames(self.video_backend.total_frames)
-        self._refresh_stamp_slider()
-
-        self.gloss_combo.clear()
-        self.gloss_combo.addItems(self.annotation_data.original_glosses)
-        self.gloss_combo.setEnabled(True)
+        total_frames = self.video_backend.total_frames
+        self.playback_slider.setEnabled(True)
+        self.playback_slider.setRange(0, max(0, total_frames - 1))
+        self.playback_slider.setValue(0)
+        self.play_btn.setEnabled(True)
+        self.play_btn.setText("▶ Play")
+        self.step_back_btn.setEnabled(True)
+        self.step_fwd_btn.setEnabled(True)
 
         sentence_str = self.current_dataset.get("sentence", "")
         if sentence_str:
+            self.sentence_label.setText(f"Sentence: {sentence_str}")
             self.setWindowTitle(
-                f"Dataset Annotator - {sentence_str} ({self.current_dataset['name']})"
+                f"Reference Video - {sentence_str} ({self.current_dataset['name']})"
             )
         else:
-            self.setWindowTitle(f"Dataset Annotator - {self.current_dataset['name']}")
+            self.sentence_label.setText(f"Video: {self.current_dataset['name']}")
+            self.setWindowTitle(f"Reference Video - {self.current_dataset['name']}")
+
+        if self.annotation_data and self.annotation_data.original_glosses:
+            ref_glosses = [g for g in self.annotation_data.original_glosses if g != "EoR"]
+            if ref_glosses:
+                self.glosses_ref_label.setText(f"Reference Glosses: {' → '.join(ref_glosses)}")
+                self.glosses_ref_label.show()
+            else:
+                self.glosses_ref_label.hide()
+        else:
+            self.glosses_ref_label.hide()
+
+        self.slider.setEnabled(True)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(max(0, total_frames - 1))
+        self.slider.setValue(0)
+        self.slider.set_total_frames(total_frames)
+        self._refresh_stamp_slider()
+
+        self.gloss_combo.clear()
+        if self.annotation_data:
+            self.gloss_combo.addItems(self.annotation_data.original_glosses)
+        self.gloss_combo.setEnabled(True)
 
         self.update_ui_state()
         self.show_frame(0)
@@ -676,20 +868,28 @@ class MainWindow(QMainWindow):
             )
             self.is_updating_slider = True
             self.slider.setValue(frame_idx)
+            self.playback_slider.setValue(frame_idx)
             self.is_updating_slider = False
             self._refresh_stamp_slider()
 
             if self.next_gloss_overlay.isVisible():
                 self._position_next_gloss_overlay()
 
+            fps = self.video_backend.fps if self.video_backend.fps > 0 else 25.0
+            total_sec = self.video_backend.total_frames / fps
+            curr_sec = frame_idx / fps
+            curr_str = f"{int(curr_sec // 60):02d}:{curr_sec % 60:04.1f}"
+            tot_str = f"{int(total_sec // 60):02d}:{total_sec % 60:04.1f}"
+            self.time_label.setText(
+                f"{curr_str} / {tot_str} (Frame {frame_idx}/{max(0, self.video_backend.total_frames - 1)})"
+            )
+
             if self.current_dataset:
-                dot = "🟢" if self.current_is_writable else "🔴"
-                color = "#4CAF50" if self.current_is_writable else "#F44336"
                 sentence_display = (
                     self.current_dataset.get("sentence")
                     or f"{self.current_dataset['name']}.json"
                 )
-                text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   {dot} <span style='color:{color}; font-weight:bold;'>{sentence_display}</span>"
+                text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   <span style='color:#64b5f6; font-weight:bold;'>{sentence_display}</span>"
             else:
                 text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}"
 
@@ -1178,8 +1378,15 @@ class MainWindow(QMainWindow):
 
     def step_frame(self, step):
         self.stop_gloss_preview()
+        self.pause_video()
         if self.video_backend.cap:
-            new_idx = self.video_backend.current_frame_idx + step
+            new_idx = max(
+                0,
+                min(
+                    self.video_backend.total_frames - 1,
+                    self.video_backend.current_frame_idx + step,
+                ),
+            )
             self.show_frame(new_idx)
 
     def quick_exchange_gloss(self):
@@ -1456,7 +1663,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Save Error", str(e))
 
     def keyPressEvent(self, event):
-        if not self.annotation_data:
+        if not self.video_backend.cap:
             return super().keyPressEvent(event)
 
         if event.key() == Qt.Key.Key_Space:
@@ -1464,19 +1671,29 @@ class MainWindow(QMainWindow):
                 self.stop_gloss_preview()
                 event.accept()
                 return
-            seg = self.slider.selected_segment()
-            if seg is not None:
-                self.start_gloss_preview(seg)
-                event.accept()
-                return
+            if self.annotation_container.isVisible():
+                seg = self.slider.selected_segment()
+                if seg is not None:
+                    self.start_gloss_preview(seg)
+                    event.accept()
+                    return
+            self.toggle_playback()
+            event.accept()
         elif event.key() == Qt.Key.Key_Left:
             self.step_frame(-1)
+            event.accept()
         elif event.key() == Qt.Key.Key_Right:
             self.step_frame(1)
-        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.record_timestamp()
-        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            self.delete_selected_timestamp()
+            event.accept()
+        elif self.annotation_container.isVisible():
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.record_timestamp()
+                event.accept()
+            elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self.delete_selected_timestamp()
+                event.accept()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
@@ -1486,6 +1703,7 @@ class MainWindow(QMainWindow):
             self._position_next_gloss_overlay()
 
     def closeEvent(self, event):
+        self.pause_video()
         self.stop_gloss_preview()
         self.cleanup_temp_video()
         self.ssh_manager.disconnect()
