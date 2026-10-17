@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -85,19 +86,29 @@ class FileBrowserDialog(QDialog):
     def __init__(self, datasets, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Video")
-        self.resize(400, 500)
+        self.resize(750, 520)
         self.datasets = datasets
         self.selected_dataset = None
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Found {len(datasets)} files matching criteria:"))
+        layout.addWidget(QLabel(f"Found {len(datasets)} videos:"))
 
         self.list_widget = QListWidget()
+        self.list_widget.setWordWrap(True)
         for ds in datasets:
-            prefix = "[✓] " if ds["annotated"] else "[  ] "
-            self.list_widget.addItem(prefix + ds["name"])
+            prefix = "[✓] " if ds.get("annotated") else "[  ] "
+            display_text = ds.get("sentence") or ds.get("name", "")
+            item = QListWidgetItem(prefix + display_text)
+            item.setToolTip(
+                f"File: {ds.get('name')}.mp4\nSentence ID: {ds.get('sentence_id')}"
+            )
+            self.list_widget.addItem(item)
+
+        if datasets:
+            self.list_widget.setCurrentRow(0)
 
         self.list_widget.itemDoubleClicked.connect(self.select_item)
+        self.list_widget.itemActivated.connect(self.select_item)
         layout.addWidget(self.list_widget)
 
         self.load_btn = QPushButton("Load Selected")

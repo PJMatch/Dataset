@@ -38,16 +38,19 @@ class FetchListWorker(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, ssh_manager, min_id, max_id):
+    def __init__(self, ssh_manager, person_id=6, min_id=None, max_id=None):
         super().__init__()
         self.ssh_manager = ssh_manager
+        self.person_id = person_id
         self.min_id = min_id
         self.max_id = max_id
 
     def run(self):
         try:
             datasets = self.ssh_manager.list_datasets(
-                min_id=self.min_id, max_id=self.max_id
+                target_person_id=self.person_id,
+                min_id=self.min_id,
+                max_id=self.max_id,
             )
             self.finished.emit(datasets)
         except Exception as e:
@@ -211,9 +214,10 @@ class MainWindow(QMainWindow):
         self.is_updating_slider = False
         self.current_temp_video = None
 
+        self.target_person_id = 6
         self.dataset_cache = {}
         self.current_dataset = None
-        self.last_query_key = None
+        self.last_query_key = f"person_{self.target_person_id}"
         self.current_is_writable = True
 
         self.word_pool = []
@@ -227,6 +231,7 @@ class MainWindow(QMainWindow):
         self._syncing_selection = False
 
         self.init_ui()
+        QTimer.singleShot(100, self.fetch_datasets)
 
     def load_word_pool(self):
         if os.path.exists("word_pool.csv"):
@@ -244,7 +249,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central_widget)
 
         top_bar = QHBoxLayout()
-        self.browse_btn = QPushButton("Fetch New Range")
+        self.browse_btn = QPushButton("Refresh List")
         self.browse_btn.setStyleSheet(
             "background-color: #444; color: white; padding: 5px; font-weight: bold;"
         )
@@ -253,7 +258,7 @@ class MainWindow(QMainWindow):
         self.browse_btn.clicked.connect(self.browse_remote)
         top_bar.addWidget(self.browse_btn)
 
-        self.cached_list_btn = QPushButton("Show Cached List")
+        self.cached_list_btn = QPushButton("Select Video")
         self.cached_list_btn.setStyleSheet(
             "background-color: #5bc0de; color: black; padding: 5px; font-weight: bold;"
         )
@@ -263,7 +268,9 @@ class MainWindow(QMainWindow):
         self.cached_list_btn.clicked.connect(self.show_cached_list)
         top_bar.addWidget(self.cached_list_btn)
 
-        self.status_label = QLabel("Connected. Please fetch a new range.")
+        self.status_label = QLabel(
+            f"Fetching video list for Person {self.target_person_id} from server..."
+        )
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
 
@@ -476,35 +483,36 @@ class MainWindow(QMainWindow):
         self._update_tools_menu_state()
         self.save_btn.setEnabled(False)
         self.history_list.clear()
+        self.setWindowTitle("Dataset Annotator (SSH)")
 
     def set_buttons_enabled(self, state):
         self.browse_btn.setEnabled(state)
-        if self.last_query_key in self.dataset_cache:
+        if (
+            self.last_query_key in self.dataset_cache
+            and self.dataset_cache[self.last_query_key]
+        ):
             self.cached_list_btn.setEnabled(state)
-
-    def browse_remote(self):
-        range_dialog = RangeInputDialog(self)
-        if range_dialog.exec() == QDialog.DialogCode.Accepted:
-            min_id, max_id = range_dialog.get_range()
         else:
-            return
+            self.cached_list_btn.setEnabled(False)
 
-        self.last_query_key = (min_id, max_id)
-        if self.last_query_key in self.dataset_cache:
-            self.on_fetch_success(
-                self.dataset_cache[self.last_query_key], from_cache=True
-            )
-            return
+    def fetch_datasets(self, person_id=None):
+        if person_id is None:
+            person_id = self.target_person_id
+        self.target_person_id = person_id
+        self.last_query_key = f"person_{person_id}"
 
         self.set_buttons_enabled(False)
         self.status_label.setText(
-            "Fetching file list from server (this may take a moment)..."
+            f"Fetching video list for Person {person_id} from server (this may take a moment)..."
         )
 
-        self.fetch_worker = FetchListWorker(self.ssh_manager, min_id, max_id)
+        self.fetch_worker = FetchListWorker(self.ssh_manager, person_id=person_id)
         self.fetch_worker.finished.connect(self.on_fetch_success)
         self.fetch_worker.error.connect(self.on_fetch_error)
         self.fetch_worker.start()
+
+    def browse_remote(self):
+        self.fetch_datasets(self.target_person_id)
 
     def show_cached_list(self):
         if self.last_query_key in self.dataset_cache:
@@ -517,6 +525,18 @@ class MainWindow(QMainWindow):
             self.dataset_cache[self.last_query_key] = datasets
 
         self.set_buttons_enabled(True)
+
+        if not datasets:
+            self.status_label.setText(
+                f"No videos found for Person {self.target_person_id}."
+            )
+            QMessageBox.information(
+                self,
+                "No Videos",
+                f"No videos found for Person {self.target_person_id}.",
+            )
+            return
+
         self.status_label.setText("Select a video from the list.")
 
         browser = FileBrowserDialog(datasets, self)
@@ -532,7 +552,12 @@ class MainWindow(QMainWindow):
 
             self.load_dataset(self.current_dataset)
         else:
-            self.status_label.setText("Browse cancelled.")
+            if not self.current_dataset:
+                self.status_label.setText(
+                    "No video selected. Click 'Select Video' to choose one."
+                )
+            else:
+                self.status_label.setText("Selection cancelled.")
 
     def on_fetch_error(self, err_msg):
         self.set_buttons_enabled(True)
@@ -542,7 +567,8 @@ class MainWindow(QMainWindow):
     def load_dataset(self, dataset):
         self.set_buttons_enabled(False)
         self.reset_annotation_ui()
-        self.status_label.setText(f"Downloading {dataset['name']} to temp memory...")
+        display_name = dataset.get("sentence") or dataset["name"]
+        self.status_label.setText(f"Downloading {display_name} to temp memory...")
 
         self.download_worker = DownloadWorker(self.ssh_manager, dataset)
         self.download_worker.finished.connect(self.on_download_success)
@@ -575,6 +601,14 @@ class MainWindow(QMainWindow):
         self.gloss_combo.addItems(self.annotation_data.original_glosses)
         self.gloss_combo.setEnabled(True)
 
+        sentence_str = self.current_dataset.get("sentence", "")
+        if sentence_str:
+            self.setWindowTitle(
+                f"Dataset Annotator - {sentence_str} ({self.current_dataset['name']})"
+            )
+        else:
+            self.setWindowTitle(f"Dataset Annotator - {self.current_dataset['name']}")
+
         self.update_ui_state()
         self.show_frame(0)
 
@@ -604,10 +638,12 @@ class MainWindow(QMainWindow):
             self.load_dataset(next_dataset)
         else:
             self.status_label.setText(
-                "Finished the current batch! Please fetch a new range."
+                f"Finished all videos for Person {self.target_person_id}!"
             )
             QMessageBox.information(
-                self, "Finished", "All videos in the current list are complete!"
+                self,
+                "Finished",
+                f"All videos for Person {self.target_person_id} in the current list are complete!",
             )
 
     def show_frame(self, frame_idx):
@@ -636,8 +672,11 @@ class MainWindow(QMainWindow):
             if self.current_dataset:
                 dot = "🟢" if self.current_is_writable else "🔴"
                 color = "#4CAF50" if self.current_is_writable else "#F44336"
-                fname = f"{self.current_dataset['name']}.json"
-                text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   {dot} <span style='color:{color}; font-weight:bold;'>{fname}</span>"
+                sentence_display = (
+                    self.current_dataset.get("sentence")
+                    or f"{self.current_dataset['name']}.json"
+                )
+                text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   {dot} <span style='color:{color}; font-weight:bold;'>{sentence_display}</span>"
             else:
                 text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}"
 
