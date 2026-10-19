@@ -1,7 +1,7 @@
 import json
 import os
 
-MIN_SEGMENT_FRAMES = 12
+MIN_SEGMENT_FRAMES = 1
 
 
 def clamp_stamp_frame(timestamps, index, frame, max_frame, min_span=MIN_SEGMENT_FRAMES):
@@ -44,6 +44,23 @@ def clamp_insert_frame(timestamps, insert_at, frame, max_frame, min_span=MIN_SEG
     if lo > hi:
         return None
     return max(lo, min(hi, frame))
+
+
+def get_sentence_id_str(dataset_info):
+    """Extract or format the sentence ID string from dataset info (e.g. '01', '98')."""
+    if not dataset_info:
+        return "01"
+    name = dataset_info.get("name", "")
+    parts = name.split("_")
+    if len(parts) >= 2 and parts[1]:
+        return parts[1]
+    if "sentence_id" in dataset_info and dataset_info["sentence_id"] is not None:
+        sid = dataset_info["sentence_id"]
+        try:
+            return f"{int(sid):02d}"
+        except (ValueError, TypeError):
+            return str(sid)
+    return "01"
 
 
 class AnnotationData:

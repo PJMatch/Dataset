@@ -2,6 +2,8 @@ import csv
 import json
 import os
 
+from datetime import datetime
+
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -11,6 +13,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -29,11 +32,13 @@ from data_model import (
     AnnotationData,
     clamp_insert_frame,
     clamp_stamp_frame,
+    get_sentence_id_str,
 )
 from remote_dialogs import FileBrowserDialog, RangeInputDialog
 from reorder_dialog import ReorderDialog
 from video_backend import VideoBackend
 from video_transport import VideoTransport
+from camera_recorder import CameraRecorderWindow
 
 
 class FetchListWorker(QThread):
@@ -236,6 +241,12 @@ class MainWindow(QMainWindow):
         self._playback_timer = QTimer(self)
         self._playback_timer.timeout.connect(self._playback_tick)
 
+        self.camera_window = None
+        self.latest_recorded_video = None
+        self.reference_video_path = None
+        self.current_mode = "reference"
+        self.user_id = ""
+
         self.init_ui()
         QTimer.singleShot(100, self.browse_remote)
 
@@ -248,6 +259,18 @@ class MainWindow(QMainWindow):
                         self.word_pool.append(row[0].strip())
         else:
             print("Warning: word_pool.csv not found in the application directory.")
+
+    def _on_main_user_id_changed(self, text):
+        self.user_id = text.strip()
+        if self.camera_window is not None:
+            self.camera_window.set_user_id(self.user_id)
+
+    def _on_camera_user_id_changed(self, user_id):
+        self.user_id = user_id
+        if self.user_id_input.text().strip() != user_id:
+            self.user_id_input.blockSignals(True)
+            self.user_id_input.setText(user_id)
+            self.user_id_input.blockSignals(False)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -274,6 +297,32 @@ class MainWindow(QMainWindow):
         self.cached_list_btn.clicked.connect(self.show_cached_list)
         top_bar.addWidget(self.cached_list_btn)
 
+        top_bar.addSpacing(16)
+        id_label = QLabel("👤 Your ID:")
+        id_label.setStyleSheet("color: white; font-weight: bold; font-size: 13px;")
+        top_bar.addWidget(id_label)
+
+        self.user_id_input = QLineEdit()
+        self.user_id_input.setPlaceholderText("e.g. 7")
+        self.user_id_input.setText(self.user_id)
+        self.user_id_input.setFixedWidth(75)
+        self.user_id_input.setFixedHeight(35)
+        self.user_id_input.setStyleSheet(
+            "QLineEdit {"
+            "  background-color: #3e3e3e;"
+            "  color: #64b5f6;"
+            "  font-weight: bold;"
+            "  font-size: 14px;"
+            "  padding: 4px 8px;"
+            "  border-radius: 4px;"
+            "  border: 1px solid #64b5f6;"
+            "}"
+        )
+        self.user_id_input.setToolTip("Your Person / User ID (replaces reference person ID in filename)")
+        self.user_id_input.textChanged.connect(self._on_main_user_id_changed)
+        top_bar.addWidget(self.user_id_input)
+
+        top_bar.addSpacing(16)
         self.status_label = QLabel("Connected. Please fetch a range.")
         self.status_label.setTextFormat(Qt.TextFormat.RichText)
         top_bar.addWidget(self.status_label)
@@ -295,12 +344,32 @@ class MainWindow(QMainWindow):
         card_layout.setContentsMargins(6, 6, 6, 6)
         card_layout.setSpacing(4)
 
+        header_row = QHBoxLayout()
         self.sentence_label = QLabel("Select a video to view reference signing.")
         self.sentence_label.setStyleSheet(
             "font-size: 16px; font-weight: bold; color: #ffffff;"
         )
         self.sentence_label.setWordWrap(True)
-        card_layout.addWidget(self.sentence_label)
+        header_row.addWidget(self.sentence_label, stretch=1)
+
+        self.switch_mode_btn = QPushButton("👁 View Reference")
+        self.switch_mode_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #455a64;"
+            "  color: white;"
+            "  font-weight: bold;"
+            "  padding: 5px 14px;"
+            "  border-radius: 4px;"
+            "  border: none;"
+            "}"
+            "QPushButton:hover { background-color: #607d8b; }"
+        )
+        self.switch_mode_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.switch_mode_btn.clicked.connect(self._toggle_view_mode)
+        self.switch_mode_btn.hide()
+        header_row.addWidget(self.switch_mode_btn)
+
+        card_layout.addLayout(header_row)
 
         self.glosses_ref_label = QLabel()
         self.glosses_ref_label.setStyleSheet(
@@ -400,16 +469,17 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.playback_container)
 
-        # Bottom Bar: Recording Module Placeholder Action Bar
+        # Bottom Bar: Recording Module Action Bar
         bottom_action_bar = QHBoxLayout()
         bottom_action_bar.addStretch()
-        self.record_btn = QPushButton("🎥 Record Your Video (Recording Module Coming Soon)")
+        self.record_btn = QPushButton("🎥 Record Your Video")
         self.record_btn.setStyleSheet(
             "background-color: #383838; color: #888; font-size: 14px; font-weight: bold; padding: 8px 18px; border-radius: 4px; border: 1px dashed #555;"
         )
         self.record_btn.setEnabled(False)
         self.record_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.record_btn.setToolTip("The recording module to record your own PJM signing video will be added here.")
+        self.record_btn.setToolTip("Select and load a reference video first to record your signing.")
+        self.record_btn.clicked.connect(self.open_camera_recorder)
         bottom_action_bar.addWidget(self.record_btn)
         bottom_action_bar.addStretch()
         layout.addLayout(bottom_action_bar)
@@ -651,6 +721,23 @@ class MainWindow(QMainWindow):
         self._update_tools_menu_state()
         self.save_btn.setEnabled(False)
         self.history_list.clear()
+        self.latest_recorded_video = None
+        self.reference_video_path = None
+        self.current_mode = "reference"
+        if hasattr(self, "switch_mode_btn"):
+            self.switch_mode_btn.hide()
+        self.annotation_container.hide()
+        self.playback_container.show()
+        self.record_btn.show()
+        self.record_btn.setEnabled(False)
+        self.record_btn.setText("🎥 Record Your Video")
+        self.record_btn.setStyleSheet(
+            "background-color: #383838; color: #888; font-size: 14px; font-weight: bold; padding: 8px 18px; border-radius: 4px; border: 1px dashed #555;"
+        )
+        self.record_btn.setToolTip("Select and load a reference video first to record your signing.")
+        if self.camera_window is not None:
+            self.camera_window.close()
+            self.camera_window = None
         self.setWindowTitle("Dataset Annotator (SSH)")
 
     def set_buttons_enabled(self, state):
@@ -769,6 +856,8 @@ class MainWindow(QMainWindow):
         self._update_tools_menu_state()
 
         self.current_temp_video = temp_video
+        self.reference_video_path = temp_video
+        self.current_mode = "reference"
         self.video_backend.load(self.current_temp_video)
         self.annotation_data = annotation_data
         self._assign_gloss_colors()
@@ -816,6 +905,30 @@ class MainWindow(QMainWindow):
 
         self.update_ui_state()
         self.show_frame(0)
+
+        # Restore reference mode UI
+        self.annotation_container.hide()
+        self.playback_container.show()
+        self.record_btn.show()
+        if hasattr(self, "switch_mode_btn"):
+            self.switch_mode_btn.hide()
+
+        # Enable Record button
+        self.record_btn.setEnabled(True)
+        self.record_btn.setText("🎥 Record Your Video")
+        self.record_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #d32f2f;"
+            "  color: white;"
+            "  font-size: 14px;"
+            "  font-weight: bold;"
+            "  padding: 8px 22px;"
+            "  border-radius: 4px;"
+            "  border: none;"
+            "}"
+            "QPushButton:hover { background-color: #f44336; }"
+        )
+        self.record_btn.setToolTip("Open camera recording module to record yourself signing this sentence.")
 
     def on_download_error(self, err_msg):
         self.set_buttons_enabled(True)
@@ -889,7 +1002,12 @@ class MainWindow(QMainWindow):
                     self.current_dataset.get("sentence")
                     or f"{self.current_dataset['name']}.json"
                 )
-                text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   <span style='color:#64b5f6; font-weight:bold;'>{sentence_display}</span>"
+                mode_tag = (
+                    "✏️ [Annotating Recording]"
+                    if self.current_mode == "annotation"
+                    else "👁 [Reference Video]"
+                )
+                text = f"{mode_tag} Frame: {frame_idx} / {self.video_backend.total_frames - 1}   |   <span style='color:#64b5f6; font-weight:bold;'>{sentence_display}</span>"
             else:
                 text = f"Frame: {frame_idx} / {self.video_backend.total_frames - 1}"
 
@@ -1133,6 +1251,11 @@ class MainWindow(QMainWindow):
             ]
         else:
             preview_data["glosses"] = list(self.annotation_data.original_glosses)
+
+        if self.user_id:
+            preview_data["person_id"] = str(self.user_id)
+        if self.current_dataset:
+            preview_data["sentence_id"] = get_sentence_id_str(self.current_dataset)
 
         msg = QMessageBox(self)
         msg.setWindowTitle("JSON Preview")
@@ -1453,18 +1576,24 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_struct = dialog.get_new_structure()
             try:
-                self.annotation_data.update_structure(new_struct)
-
+                self.annotation_data.recorded_glosses = []
+                self.annotation_data.timestamps = []
+                if not new_struct or new_struct[-1] != "EoR":
+                    new_struct.append("EoR")
+                self.annotation_data.original_glosses = new_struct
+                self.annotation_data._factory_glosses = list(new_struct)
+                self.annotation_data.data["glosses"] = new_struct
+                self._assign_gloss_colors()
                 self.gloss_combo.clear()
                 self.gloss_combo.addItems(self.annotation_data.original_glosses)
                 self.update_ui_state()
                 QMessageBox.information(
-                    self, "Success", "Structure updated and saved to server!"
+                    self, "Success", "Structure updated for this video annotation!"
                 )
 
             except Exception as e:
                 QMessageBox.critical(
-                    self, "Error", f"Failed to save new structure:\n{e}"
+                    self, "Error", f"Failed to update structure:\n{e}"
                 )
 
         self.setFocus()
@@ -1610,23 +1739,16 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self,
-            "Confirm Rejection",
-            "Are you SURE you want to mark this video as poorly recorded?\n\nThis will instantly set 'recorded_correctly: false' on the server and skip the video permanently.",
+            "Confirm Discard",
+            "Are you sure you want to discard this recorded video and its annotations?\n\n"
+            "This will skip to the next video without saving any new files.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            try:
-                self.annotation_data.set_recorded_correctly_false()
-                if self.current_dataset:
-                    self.current_dataset["annotated"] = True
-
-                self.reset_annotation_ui()
-                self.load_next_dataset()
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to reject file:\n{e}")
+            self.reset_annotation_ui()
+            self.load_next_dataset()
 
     def skip_video(self):
         if not self.current_dataset or not self.last_query_key:
@@ -1642,17 +1764,55 @@ class MainWindow(QMainWindow):
             self,
         )
 
-        if not self.current_is_writable:
-            dialog.save_btn.setEnabled(False)
-            dialog.save_btn.setText("Cannot Save (Read-Only File)")
-            dialog.save_btn.setStyleSheet(
-                "background-color: #888; color: #ccc; font-weight: bold;"
-            )
-
         if dialog.exec() == QDialog.DialogCode.Accepted:
             reordered = dialog.get_reordered_glosses()
             try:
-                self.annotation_data.finalize_and_save(reordered)
+                # 1. Determine local JSON path in recordings/ folder matching recorded video
+                if self.latest_recorded_video:
+                    json_path = (
+                        os.path.splitext(self.latest_recorded_video)[0] + ".json"
+                    )
+                else:
+                    target_dir = os.path.join(os.getcwd(), "recordings")
+                    os.makedirs(target_dir, exist_ok=True)
+                    sentence_id_str = get_sentence_id_str(self.current_dataset)
+                    date_time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    base_name = f"{self.user_id}_{sentence_id_str}_{date_time_str}"
+                    json_path = os.path.join(target_dir, f"{base_name}.json")
+
+                # 2. Build and save new local JSON data
+                sorted_timestamps = sorted(self.annotation_data.timestamps)
+                save_data = dict(self.annotation_data.data)
+                save_data["glosses"] = [
+                    [g, t] for g, t in zip(reordered, sorted_timestamps)
+                ]
+                save_data["person_id"] = str(self.user_id) if self.user_id else "unknown"
+                save_data["sentence_id"] = get_sentence_id_str(self.current_dataset)
+                save_data["recorded_correctly"] = True
+                save_data["recording_date"] = datetime.now().strftime(
+                    "%Y-%m-%dT%H:%M:%S.000000"
+                )
+
+                os.makedirs(os.path.dirname(os.path.abspath(json_path)), exist_ok=True)
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(save_data, f, indent=4, ensure_ascii=False)
+
+                video_basename = (
+                    os.path.basename(self.latest_recorded_video)
+                    if self.latest_recorded_video
+                    else "N/A"
+                )
+                json_basename = os.path.basename(json_path)
+
+                QMessageBox.information(
+                    self,
+                    "Saved Locally",
+                    f"Saved new recording & annotations locally to recordings/:\n\n"
+                    f"📹 Video: {video_basename}\n"
+                    f"📝 JSON: {json_basename}\n\n"
+                    f"(No server data was modified)",
+                )
+
                 if self.current_dataset:
                     self.current_dataset["annotated"] = True
 
@@ -1702,9 +1862,210 @@ class MainWindow(QMainWindow):
         if self.next_gloss_overlay.isVisible():
             self._position_next_gloss_overlay()
 
+    def open_camera_recorder(self):
+        if not self.current_dataset:
+            QMessageBox.information(
+                self, "No Video", "Please select and load a reference video first."
+            )
+            return
+
+        # Enforce User ID requirement before recording
+        if not self.user_id:
+            user_id_val, ok = QInputDialog.getText(
+                self,
+                "User ID Required",
+                "⚠️ You must enter your User ID before recording.\n\n"
+                "Please enter your ID (e.g., 7):",
+            )
+            if not ok or not user_id_val.strip():
+                QMessageBox.warning(
+                    self,
+                    "Recording Blocked",
+                    "Recording is not possible without entering a User ID.",
+                )
+                self.status_label.setText("⚠️ User ID is required to record a video.")
+                return
+            self.user_id = user_id_val.strip()
+            self.user_id_input.setText(self.user_id)
+
+        if self.camera_window is not None and self.camera_window.isVisible():
+            self.camera_window.set_user_id(self.user_id)
+            self.camera_window.raise_()
+            self.camera_window.activateWindow()
+            return
+
+        original_glosses = (
+            self.annotation_data.original_glosses if self.annotation_data else None
+        )
+        self.camera_window = CameraRecorderWindow(
+            parent=None,
+            dataset_info=self.current_dataset,
+            original_glosses=original_glosses,
+            user_id=self.user_id,
+        )
+        self.camera_window.video_recorded.connect(self.on_user_video_recorded)
+        self.camera_window.annotate_requested.connect(self.start_annotation_workflow)
+        self.camera_window.user_id_changed.connect(self._on_camera_user_id_changed)
+        self.camera_window.show()
+        self.camera_window.raise_()
+        self.camera_window.activateWindow()
+
+    def on_user_video_recorded(self, file_path, frame_count, duration):
+        self.latest_recorded_video = file_path
+        sentence_str = (
+            self.current_dataset.get("sentence")
+            or self.current_dataset.get("name")
+        )
+        self.status_label.setText(
+            f"🎥 Recorded {os.path.basename(file_path)} ({frame_count} frames, {duration:.1f}s) for {sentence_str}"
+        )
+        if hasattr(self, "switch_mode_btn") and self.current_mode == "reference":
+            self.switch_mode_btn.setText("✏️ Annotate Recording")
+            self.switch_mode_btn.show()
+
+    def start_annotation_workflow(self, file_path, frame_count, duration):
+        """Transition directly to the annotation interface when 'Annotate' is clicked in the camera recorder."""
+        self.latest_recorded_video = file_path
+        if self.camera_window is not None:
+            self.camera_window.close()
+            self.camera_window = None
+
+        # Fresh annotation slate for this new recorded video
+        if self.annotation_data:
+            self.annotation_data.reset_to_factory()
+            self._assign_gloss_colors()
+
+        self.switch_to_annotation_mode()
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+    def switch_to_annotation_mode(self):
+        if not self.latest_recorded_video or not os.path.exists(self.latest_recorded_video):
+            QMessageBox.warning(
+                self, "No Recording", "No recorded video found to annotate."
+            )
+            return
+
+        self.pause_video()
+        self.stop_gloss_preview()
+        self.current_mode = "annotation"
+
+        # Hide reference playback controls & record button
+        self.playback_container.hide()
+        self.record_btn.hide()
+
+        # Show annotation controls
+        self.annotation_container.show()
+
+        # Update mode switch button
+        if hasattr(self, "switch_mode_btn"):
+            self.switch_mode_btn.setText("👁 View Reference")
+            self.switch_mode_btn.show()
+
+        # Load the recorded video
+        self.video_backend.load(self.latest_recorded_video)
+        total_frames = self.video_backend.total_frames
+
+        # Configure VideoTransport slider
+        self.slider.setEnabled(True)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(max(0, total_frames - 1))
+        self.slider.setValue(0)
+        self.slider.set_total_frames(total_frames)
+        self._refresh_stamp_slider()
+
+        # Configure gloss combo to current progress
+        self.gloss_combo.blockSignals(True)
+        self.gloss_combo.clear()
+        if self.annotation_data:
+            self.gloss_combo.addItems(self.annotation_data.original_glosses)
+            next_idx = len(self.annotation_data.recorded_glosses)
+            if next_idx < self.gloss_combo.count():
+                self.gloss_combo.setCurrentIndex(next_idx)
+            self.gloss_combo.setEnabled(not self.annotation_data.is_complete())
+        self.gloss_combo.blockSignals(False)
+
+        # Enable action buttons
+        self.save_btn.setEnabled(self.current_is_writable)
+        self.reject_btn.setEnabled(self.current_is_writable)
+        if self.word_pool and self.current_is_writable:
+            self.exchange_btn.setEnabled(True)
+        self._update_tools_menu_state()
+
+        self.update_ui_state()
+        self.show_frame(0)
+
+        sentence_str = (
+            self.current_dataset.get("sentence")
+            or self.current_dataset.get("name", "")
+        ) if self.current_dataset else ""
+        self.setWindowTitle(
+            f"Annotate Recorded Video - {sentence_str} ({os.path.basename(self.latest_recorded_video)})"
+        )
+        self.status_label.setText(
+            f"✏️ Annotating recorded video ({total_frames} frames). Press Enter to stamp gloss."
+        )
+
+    def switch_to_reference_mode(self):
+        if not self.current_temp_video or not os.path.exists(self.current_temp_video):
+            QMessageBox.warning(
+                self, "No Reference Video", "Reference video is not loaded."
+            )
+            return
+
+        self.pause_video()
+        self.stop_gloss_preview()
+        self.current_mode = "reference"
+
+        # Hide annotation controls
+        self.annotation_container.hide()
+        self.next_gloss_overlay.hide()
+
+        # Show reference controls & Record button
+        self.playback_container.show()
+        self.record_btn.show()
+
+        # Update mode toggle button
+        if hasattr(self, "switch_mode_btn"):
+            self.switch_mode_btn.setText("✏️ Annotate Recording")
+            self.switch_mode_btn.show()
+
+        # Load reference video back
+        self.video_backend.load(self.current_temp_video)
+        total_frames = self.video_backend.total_frames
+
+        self.playback_slider.setEnabled(True)
+        self.playback_slider.setRange(0, max(0, total_frames - 1))
+        self.playback_slider.setValue(0)
+        self.play_btn.setEnabled(True)
+        self.play_btn.setText("▶ Play")
+        self.step_back_btn.setEnabled(True)
+        self.step_fwd_btn.setEnabled(True)
+
+        self.show_frame(0)
+
+        sentence_str = (
+            self.current_dataset.get("sentence")
+            or self.current_dataset.get("name", "")
+        ) if self.current_dataset else ""
+        self.setWindowTitle(f"Reference Video - {sentence_str}")
+        self.status_label.setText(f"👁 Viewing reference video: {sentence_str}")
+
+    def _toggle_view_mode(self):
+        if self.current_mode == "annotation":
+            self.switch_to_reference_mode()
+        else:
+            self.switch_to_annotation_mode()
+
     def closeEvent(self, event):
         self.pause_video()
         self.stop_gloss_preview()
         self.cleanup_temp_video()
+        if self.camera_window is not None:
+            self.camera_window.close()
+            self.camera_window = None
         self.ssh_manager.disconnect()
         event.accept()
