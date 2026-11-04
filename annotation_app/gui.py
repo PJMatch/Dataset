@@ -1219,19 +1219,18 @@ class MainWindow(QMainWindow):
         self.gloss_combo.addItems(self.annotation_data.original_glosses)
         if next_idx < self.gloss_combo.count():
             self.gloss_combo.setCurrentIndex(next_idx)
+        elif self.gloss_combo.count() > 0:
+            self.gloss_combo.setCurrentIndex(self.gloss_combo.count() - 1)
         self.gloss_combo.blockSignals(False)
         self.update_next_gloss_overlay()
 
     def _update_tools_menu_state(self):
         has_data = self.annotation_data is not None
-        writable = self.current_is_writable
         self.tools_btn.setEnabled(has_data)
         self._action_do_later.setEnabled(has_data)
         self._action_preview_json.setEnabled(has_data)
-        self._action_edit_list.setEnabled(
-            has_data and writable and bool(self.word_pool)
-        )
-        self._action_reset.setEnabled(has_data and writable)
+        self._action_edit_list.setEnabled(has_data and bool(self.word_pool))
+        self._action_reset.setEnabled(has_data)
 
     def preview_json(self):
         if not self.annotation_data:
@@ -1308,9 +1307,6 @@ class MainWindow(QMainWindow):
             if is_selected_target:
                 delete_action = menu.addAction("Delete gloss")
                 replace_action = menu.addAction("Replace")
-                if not self.current_is_writable:
-                    delete_action.setEnabled(False)
-                    replace_action.setEnabled(False)
                 chosen = menu.exec(global_pos)
                 if chosen is None:
                     return
@@ -1320,8 +1316,6 @@ class MainWindow(QMainWindow):
                     self._replace_planned_gloss(segment_index)
             else:
                 add_action = menu.addAction("Add gloss")
-                if not self.current_is_writable:
-                    add_action.setEnabled(False)
                 chosen = menu.exec(global_pos)
                 if chosen is None:
                     return
@@ -1340,9 +1334,6 @@ class MainWindow(QMainWindow):
             delete_action = menu.addAction("Delete gloss")
             replace_action = menu.addAction("Replace")
             preview_action = menu.addAction("Preview")
-            if not self.current_is_writable:
-                delete_action.setEnabled(False)
-                replace_action.setEnabled(False)
             chosen = menu.exec(global_pos)
             if chosen is None:
                 return
@@ -1355,8 +1346,6 @@ class MainWindow(QMainWindow):
                 self.start_gloss_preview(segment_index)
         else:
             add_action = menu.addAction("Add gloss")
-            if not self.current_is_writable:
-                add_action.setEnabled(False)
             chosen = menu.exec(global_pos)
             if chosen is None:
                 return
@@ -1481,15 +1470,18 @@ class MainWindow(QMainWindow):
             self.annotation_data.timestamps
         ):
             return
-        if self.annotation_data.recorded_glosses[segment_index] == "EoR":
-            return
 
-        deleted_gloss = self.annotation_data.recorded_glosses[segment_index]
+        deleted_gloss = (
+            self.annotation_data.recorded_glosses[segment_index]
+            if segment_index < len(self.annotation_data.recorded_glosses)
+            else None
+        )
         self.annotation_data.delete_timestamp(segment_index)
 
-        idx = self.gloss_combo.findText(deleted_gloss)
-        if idx >= 0:
-            self.gloss_combo.setCurrentIndex(idx)
+        if deleted_gloss:
+            idx = self.gloss_combo.findText(deleted_gloss)
+            if idx >= 0:
+                self.gloss_combo.setCurrentIndex(idx)
 
         self.slider.clear_segment_selection()
         self._refresh_stamp_slider()
@@ -1603,13 +1595,18 @@ class MainWindow(QMainWindow):
             return False, "No data loaded."
 
         recorded = self.annotation_data.recorded_glosses
-        if len(recorded) < 2:
-            return False, "You must record at least 2 glosses to save."
-        if recorded[-1] != "EoR":
-            return (
-                False,
-                "The very last gloss recorded must be 'EoR' (End of Recording).",
-            )
+        content_glosses = [g for g in recorded if g != "EoR"]
+        if not content_glosses:
+            return False, "You must record at least 1 gloss to save."
+
+        max_frame = (
+            self.video_backend.total_frames - 1
+            if self.video_backend and self.video_backend.total_frames > 0
+            else None
+        )
+        self.annotation_data.ensure_eor_last(
+            default_frame=max_frame, max_frame=max_frame
+        )
 
         return True, ""
 
@@ -1684,20 +1681,24 @@ class MainWindow(QMainWindow):
         stamp_idx = self._selected_stamp_index()
         if stamp_idx is None:
             return
-        if self.annotation_data.recorded_glosses[stamp_idx] == "EoR":
-            return
 
-        deleted_gloss = self.annotation_data.recorded_glosses[stamp_idx]
+        deleted_gloss = (
+            self.annotation_data.recorded_glosses[stamp_idx]
+            if stamp_idx < len(self.annotation_data.recorded_glosses)
+            else None
+        )
         self.annotation_data.delete_timestamp(stamp_idx)
 
-        idx = self.gloss_combo.findText(deleted_gloss)
-        if idx >= 0:
-            self.gloss_combo.setCurrentIndex(idx)
+        if deleted_gloss:
+            idx = self.gloss_combo.findText(deleted_gloss)
+            if idx >= 0:
+                self.gloss_combo.setCurrentIndex(idx)
 
         self.slider.clear_segment_selection()
         self._syncing_selection = True
         self.history_list.clearSelection()
         self._syncing_selection = False
+        self._refresh_stamp_slider()
         self.update_ui_state()
 
     def update_ui_state(self):
@@ -1711,7 +1712,7 @@ class MainWindow(QMainWindow):
         else:
             self.gloss_label.setText("Gloss:")
             self.gloss_combo.setEnabled(True)
-            if self.word_pool and self.current_is_writable:
+            if self.word_pool:
                 self.exchange_btn.setEnabled(True)
 
         stamp_sel = self.slider.selected_segment()
@@ -1766,7 +1767,12 @@ class MainWindow(QMainWindow):
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
             reordered = dialog.get_reordered_glosses()
+            final_timestamps = dialog.get_final_timestamps()
             try:
+                # Update annotation data in memory to match dialog
+                self.annotation_data.recorded_glosses = list(reordered)
+                self.annotation_data.timestamps = list(final_timestamps)
+
                 # 1. Determine local JSON path in recordings/ folder matching recorded video
                 if self.latest_recorded_video:
                     json_path = (
@@ -1781,10 +1787,9 @@ class MainWindow(QMainWindow):
                     json_path = os.path.join(target_dir, f"{base_name}.json")
 
                 # 2. Build and save new local JSON data
-                sorted_timestamps = sorted(self.annotation_data.timestamps)
                 save_data = dict(self.annotation_data.data)
                 save_data["glosses"] = [
-                    [g, t] for g, t in zip(reordered, sorted_timestamps)
+                    [g, t] for g, t in zip(reordered, final_timestamps)
                 ]
                 save_data["person_id"] = str(self.user_id) if self.user_id else "unknown"
                 save_data["sentence_id"] = get_sentence_id_str(self.current_dataset)
@@ -1988,10 +1993,11 @@ class MainWindow(QMainWindow):
             self.gloss_combo.setEnabled(not self.annotation_data.is_complete())
         self.gloss_combo.blockSignals(False)
 
-        # Enable action buttons
-        self.save_btn.setEnabled(self.current_is_writable)
-        self.reject_btn.setEnabled(self.current_is_writable)
-        if self.word_pool and self.current_is_writable:
+        # Enable action buttons (local recording annotation is always writable)
+        self.current_is_writable = True
+        self.save_btn.setEnabled(True)
+        self.reject_btn.setEnabled(True)
+        if self.word_pool:
             self.exchange_btn.setEnabled(True)
         self._update_tools_menu_state()
 

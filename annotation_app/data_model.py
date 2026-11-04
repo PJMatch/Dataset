@@ -93,12 +93,54 @@ class AnnotationData:
         self.original_glosses = list(self._factory_glosses)
 
     def add_timestamp(self, selected_gloss, frame_idx, max_frame=None):
-        if not self.is_complete():
-            if self.timestamps and max_frame is not None:
-                frame_idx = max(frame_idx, self.timestamps[-1] + MIN_SEGMENT_FRAMES)
+        if not selected_gloss:
+            return
+
+        eor_i = self.eor_index()
+
+        # 1. User is explicitly recording "EoR"
+        if selected_gloss == "EoR":
+            if max_frame is not None:
                 frame_idx = min(frame_idx, max_frame)
-            self.recorded_glosses.append(selected_gloss)
-            self.timestamps.append(frame_idx)
+            if self.timestamps:
+                prev_t = (
+                    self.timestamps[-2]
+                    if eor_i == len(self.timestamps) - 1 and len(self.timestamps) > 1
+                    else (
+                        self.timestamps[-1]
+                        if eor_i is None or eor_i != len(self.timestamps) - 1
+                        else 0
+                    )
+                )
+                frame_idx = max(frame_idx, prev_t + MIN_SEGMENT_FRAMES)
+
+            if eor_i is not None:
+                self.timestamps[eor_i] = frame_idx
+                self.ensure_eor_last(max_frame=max_frame, create_if_missing=False)
+            else:
+                self.recorded_glosses.append("EoR")
+                self.timestamps.append(frame_idx)
+            return
+
+        # 2. User is recording a content gloss, but EoR is already in recorded_glosses
+        if eor_i is not None:
+            if eor_i > 0:
+                frame_idx = max(
+                    frame_idx, self.timestamps[eor_i - 1] + MIN_SEGMENT_FRAMES
+                )
+            if max_frame is not None:
+                frame_idx = min(frame_idx, max_frame)
+            self.recorded_glosses.insert(eor_i, selected_gloss)
+            self.timestamps.insert(eor_i, frame_idx)
+            self.ensure_eor_last(max_frame=max_frame, create_if_missing=False)
+            return
+
+        # 3. Normal content gloss stamping (EoR is not recorded yet - DO NOT add EoR)
+        if self.timestamps and max_frame is not None:
+            frame_idx = max(frame_idx, self.timestamps[-1] + MIN_SEGMENT_FRAMES)
+            frame_idx = min(frame_idx, max_frame)
+        self.recorded_glosses.append(selected_gloss)
+        self.timestamps.append(frame_idx)
 
     def eor_index(self):
         for i, gloss in enumerate(self.recorded_glosses):
@@ -106,19 +148,46 @@ class AnnotationData:
                 return i
         return None
 
-    def ensure_eor_last(self):
-        idx = self.eor_index()
-        if idx is None or idx == len(self.recorded_glosses) - 1:
+    def ensure_eor_last(self, default_frame=None, max_frame=None, create_if_missing=False):
+        """Ensure that 'EoR' is the very last recorded gloss with a valid timestamp."""
+        eor_i = self.eor_index()
+        if eor_i is None:
+            if create_if_missing:
+                last_t = self.timestamps[-1] if self.timestamps else 0
+                frame = (
+                    default_frame
+                    if default_frame is not None
+                    else (last_t + MIN_SEGMENT_FRAMES)
+                )
+                if self.timestamps:
+                    frame = max(frame, last_t + MIN_SEGMENT_FRAMES)
+                if max_frame is not None:
+                    frame = min(frame, max_frame)
+                self.recorded_glosses.append("EoR")
+                self.timestamps.append(frame)
+                if "EoR" not in self.original_glosses:
+                    self.original_glosses.append("EoR")
             return
-        gloss = self.recorded_glosses.pop(idx)
-        stamp = self.timestamps.pop(idx)
-        self.recorded_glosses.append(gloss)
-        self.timestamps.append(stamp)
+
+        if eor_i != len(self.recorded_glosses) - 1:
+            gloss = self.recorded_glosses.pop(eor_i)
+            stamp = self.timestamps.pop(eor_i)
+            self.recorded_glosses.append(gloss)
+            last_t = self.timestamps[-1] if self.timestamps else 0
+            new_stamp = max(stamp, last_t + MIN_SEGMENT_FRAMES)
+            if max_frame is not None:
+                new_stamp = min(new_stamp, max_frame)
+            self.timestamps.append(new_stamp)
+        else:
+            if len(self.timestamps) > 1:
+                prev_t = self.timestamps[-2]
+                if self.timestamps[-1] < prev_t + MIN_SEGMENT_FRAMES:
+                    self.timestamps[-1] = prev_t + MIN_SEGMENT_FRAMES
+            if max_frame is not None:
+                self.timestamps[-1] = min(self.timestamps[-1], max_frame)
 
     def delete_timestamp(self, index):
         if 0 <= index < len(self.timestamps):
-            if self.recorded_glosses[index] == "EoR":
-                return
             self.recorded_glosses.pop(index)
             self.timestamps.pop(index)
 
@@ -160,28 +229,29 @@ class AnnotationData:
         self.original_glosses[index] = gloss
 
     def move_gloss_in_order(self, from_index, to_index):
-        """Reorder gloss names in the master list only.
-
-        Timestamps are never moved or edited: stamped frames stay put, and the
-        recorded gloss names are always re-derived from the master list so the
-        two never drift apart (which previously caused duplicated names).
-        """
-        recorded = len(self.recorded_glosses)
-        hi = self._eor_original_index() - 1
         if from_index == to_index:
             return
-        if from_index < 0 or to_index < 0 or from_index > hi or to_index > hi:
-            return
-        if self.original_glosses[from_index] == "EoR":
+        if from_index < 0 or to_index < 0:
             return
 
-        gloss = self.original_glosses.pop(from_index)
-        insert_at = to_index - 1 if from_index < to_index else to_index
-        self.original_glosses.insert(insert_at, gloss)
+        # 1. Reorder in original_glosses if both indices are in range and not EoR
+        eor_orig = self._eor_original_index()
+        max_orig_idx = (
+            eor_orig - 1 if eor_orig > 0 else len(self.original_glosses) - 1
+        )
+        if from_index <= max_orig_idx and to_index <= max_orig_idx:
+            gloss = self.original_glosses.pop(from_index)
+            self.original_glosses.insert(to_index, gloss)
 
-        for i in range(recorded):
-            if i < len(self.original_glosses) and self.recorded_glosses[i] != "EoR":
-                self.recorded_glosses[i] = self.original_glosses[i]
+        # 2. Reorder in recorded_glosses if both indices are recorded and neither is EoR
+        rec_len = len(self.recorded_glosses)
+        if from_index < rec_len and to_index < rec_len:
+            if (
+                self.recorded_glosses[from_index] != "EoR"
+                and self.recorded_glosses[to_index] != "EoR"
+            ):
+                g = self.recorded_glosses.pop(from_index)
+                self.recorded_glosses.insert(to_index, g)
 
     def move_unrecorded_gloss(self, from_index, to_index):
         self.move_gloss_in_order(from_index, to_index)
@@ -190,11 +260,15 @@ class AnnotationData:
         self.move_gloss_in_order(from_index, to_index)
 
     def repair_timestamps(self, max_frame):
-        self.ensure_eor_last()
+        if self.eor_index() is not None:
+            self.ensure_eor_last(max_frame=max_frame, create_if_missing=False)
         ensure_monotonic_timestamps(self.timestamps, max_frame)
 
     def is_complete(self):
-        return len(self.timestamps) >= len(self.original_glosses)
+        # Annotation is complete only when EoR has been explicitly recorded by the user
+        has_content = any(g != "EoR" for g in self.recorded_glosses)
+        eor_recorded = self.eor_index() is not None
+        return has_content and eor_recorded
 
     def finalize_and_save(self, reordered_glosses):
         sorted_timestamps = sorted(self.timestamps)
