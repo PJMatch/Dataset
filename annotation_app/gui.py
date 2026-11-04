@@ -34,7 +34,7 @@ from data_model import (
     clamp_stamp_frame,
     get_sentence_id_str,
 )
-from remote_dialogs import FileBrowserDialog, RangeInputDialog
+from remote_dialogs import FileBrowserDialog, IdListInputDialog, RangeInputDialog
 from reorder_dialog import ReorderDialog
 from video_backend import VideoBackend
 from video_transport import VideoTransport
@@ -45,12 +45,20 @@ class FetchListWorker(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, ssh_manager, person_id=6, min_id=None, max_id=None):
+    def __init__(
+        self,
+        ssh_manager,
+        person_id=6,
+        min_id=None,
+        max_id=None,
+        sentence_ids=None,
+    ):
         super().__init__()
         self.ssh_manager = ssh_manager
         self.person_id = person_id
         self.min_id = min_id
         self.max_id = max_id
+        self.sentence_ids = sentence_ids
 
     def run(self):
         try:
@@ -58,6 +66,7 @@ class FetchListWorker(QThread):
                 target_person_id=self.person_id,
                 min_id=self.min_id,
                 max_id=self.max_id,
+                sentence_ids=self.sentence_ids,
             )
             self.finished.emit(datasets)
         except Exception as e:
@@ -238,6 +247,7 @@ class MainWindow(QMainWindow):
         self._syncing_selection = False
 
         self.is_playing = False
+        self.is_looping = False
         self._playback_timer = QTimer(self)
         self._playback_timer.timeout.connect(self._playback_tick)
 
@@ -286,6 +296,18 @@ class MainWindow(QMainWindow):
         self.browse_btn.setFixedHeight(35)
         self.browse_btn.clicked.connect(self.browse_remote)
         top_bar.addWidget(self.browse_btn)
+
+        self.fetch_by_list_btn = QPushButton("Fetch by ID List")
+        self.fetch_by_list_btn.setStyleSheet(
+            "background-color: #444; color: white; padding: 5px; font-weight: bold;"
+        )
+        self.fetch_by_list_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fetch_by_list_btn.setFixedHeight(35)
+        self.fetch_by_list_btn.setToolTip(
+            "Filter videos by a comma-separated list of Sentence IDs (e.g. 279, 285, 423)"
+        )
+        self.fetch_by_list_btn.clicked.connect(self.browse_by_id_list)
+        top_bar.addWidget(self.fetch_by_list_btn)
 
         self.cached_list_btn = QPushButton("Select Video")
         self.cached_list_btn.setStyleSheet(
@@ -385,12 +407,16 @@ class MainWindow(QMainWindow):
         self.video_container = QWidget()
         self.video_container.setMinimumSize(640, 360)
         self.video_container.setStyleSheet("background-color: black;")
+        self.video_container.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.video_container.customContextMenuRequested.connect(self._show_video_context_menu)
         video_container_layout = QVBoxLayout(self.video_container)
         video_container_layout.setContentsMargins(0, 0, 0, 0)
 
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black;")
+        self.video_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.video_label.customContextMenuRequested.connect(self._show_video_context_menu)
         video_container_layout.addWidget(self.video_label)
 
         self.next_gloss_overlay = QLabel(self.video_container)
@@ -410,6 +436,22 @@ class MainWindow(QMainWindow):
             Qt.WidgetAttribute.WA_TranslucentBackground
         )
         self.next_gloss_overlay.hide()
+
+        self.loop_badge = QLabel("🔁 LOOP", self.video_container)
+        self.loop_badge.setStyleSheet(
+            "QLabel {"
+            "  background-color: rgba(33, 150, 243, 0.85);"
+            "  color: white;"
+            "  font-size: 11px;"
+            "  font-weight: bold;"
+            "  border-radius: 4px;"
+            "  padding: 3px 8px;"
+            "}"
+        )
+        self.loop_badge.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.loop_badge.hide()
 
         layout.addWidget(self.video_container, stretch=1)
 
@@ -451,6 +493,25 @@ class MainWindow(QMainWindow):
         self.step_fwd_btn.setEnabled(False)
         self.step_fwd_btn.clicked.connect(lambda: self.step_frame(1))
         pb_layout.addWidget(self.step_fwd_btn)
+
+        self.loop_btn = QPushButton("🔁 Loop")
+        self.loop_btn.setCheckable(True)
+        self.loop_btn.setChecked(False)
+        self.loop_btn.setToolTip("Toggle infinite loop playback (L)")
+        self.loop_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #444; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
+            "}"
+            "QPushButton:hover { background-color: #555; }"
+            "QPushButton:checked { background-color: #1976D2; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; border: 1px solid #42a5f5; }"
+            "QPushButton:checked:hover { background-color: #2196F3; }"
+            "QPushButton:disabled { background-color: #333; color: #666; }"
+        )
+        self.loop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.loop_btn.setFixedHeight(34)
+        self.loop_btn.setEnabled(False)
+        self.loop_btn.toggled.connect(self.set_looping)
+        pb_layout.addWidget(self.loop_btn)
 
         self.playback_slider = QSlider(Qt.Orientation.Horizontal)
         self.playback_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -567,6 +628,10 @@ class MainWindow(QMainWindow):
         self._action_do_later = self._tools_menu.addAction("Do Later")
         self._action_reset = self._tools_menu.addAction("Reset")
         self._action_preview_json = self._tools_menu.addAction("Preview JSON")
+        self._action_toggle_loop = self._tools_menu.addAction("🔁 Loop Video Playback")
+        self._action_toggle_loop.setCheckable(True)
+        self._action_toggle_loop.setChecked(self.is_looping)
+        self._action_toggle_loop.toggled.connect(self.set_looping)
         self._action_edit_list.triggered.connect(self.edit_structure)
         self._action_do_later.triggered.connect(self.skip_video)
         self._action_reset.triggered.connect(self.reset_annotation_progress)
@@ -644,6 +709,9 @@ class MainWindow(QMainWindow):
             return
         curr = self.video_backend.current_frame_idx
         if curr + 1 >= self.video_backend.total_frames:
+            if self.is_looping and self.video_backend.total_frames > 0:
+                self.show_frame(0)
+                return
             self.pause_video()
             return
         self.show_frame(curr + 1)
@@ -667,6 +735,59 @@ class MainWindow(QMainWindow):
     def stop_gloss_preview(self):
         if self._preview_timer.isActive():
             self._preview_timer.stop()
+
+    def set_looping(self, enabled):
+        self.is_looping = bool(enabled)
+        if hasattr(self, "loop_btn") and self.loop_btn.isChecked() != self.is_looping:
+            self.loop_btn.blockSignals(True)
+            self.loop_btn.setChecked(self.is_looping)
+            self.loop_btn.blockSignals(False)
+        if (
+            hasattr(self, "_action_toggle_loop")
+            and self._action_toggle_loop.isChecked() != self.is_looping
+        ):
+            self._action_toggle_loop.blockSignals(True)
+            self._action_toggle_loop.setChecked(self.is_looping)
+            self._action_toggle_loop.blockSignals(False)
+        if hasattr(self, "loop_badge"):
+            self.loop_badge.setVisible(
+                self.is_looping and self.video_backend.cap is not None
+            )
+            if self.loop_badge.isVisible():
+                self._position_loop_badge()
+
+    def _position_loop_badge(self):
+        self.loop_badge.adjustSize()
+        x = max(0, self.video_container.width() - self.loop_badge.width() - 10)
+        y = 10
+        self.loop_badge.move(x, y)
+        self.loop_badge.raise_()
+
+    def _show_video_context_menu(self, pos):
+        if not self.video_backend.cap:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_style())
+
+        play_act = menu.addAction(
+            "⏸ Pause (Space)" if self.is_playing else "▶ Play (Space)"
+        )
+        play_act.triggered.connect(self.toggle_playback)
+
+        loop_act = menu.addAction("🔁 Loop Infinitely / Zapętl wideo (L)")
+        loop_act.setCheckable(True)
+        loop_act.setChecked(self.is_looping)
+        loop_act.triggered.connect(lambda checked: self.set_looping(checked))
+
+        menu.addSeparator()
+        step_b_act = menu.addAction("⏮ -1 Frame (Left)")
+        step_b_act.triggered.connect(lambda: self.step_frame(-1))
+        step_f_act = menu.addAction("+1 ⏭ Frame (Right)")
+        step_f_act.triggered.connect(lambda: self.step_frame(1))
+
+        sender = self.sender()
+        target_widget = sender if isinstance(sender, QWidget) else self.video_container
+        menu.exec(target_widget.mapToGlobal(pos))
 
     def _position_next_gloss_overlay(self):
         self.next_gloss_overlay.adjustSize()
@@ -704,6 +825,9 @@ class MainWindow(QMainWindow):
         self.play_btn.setText("▶ Play")
         self.step_back_btn.setEnabled(False)
         self.step_fwd_btn.setEnabled(False)
+        self.loop_btn.setEnabled(False)
+        if hasattr(self, "loop_badge"):
+            self.loop_badge.hide()
         self.playback_slider.setEnabled(False)
         self.playback_slider.setValue(0)
         self.time_label.setText("00:00.0 / 00:00.0 (Frame 0/0)")
@@ -742,6 +866,8 @@ class MainWindow(QMainWindow):
 
     def set_buttons_enabled(self, state):
         self.browse_btn.setEnabled(state)
+        if hasattr(self, "fetch_by_list_btn"):
+            self.fetch_by_list_btn.setEnabled(state)
         if (
             self.last_query_key in self.dataset_cache
             and self.dataset_cache[self.last_query_key]
@@ -750,18 +876,60 @@ class MainWindow(QMainWindow):
         else:
             self.cached_list_btn.setEnabled(False)
 
+    def browse_by_id_list(self):
+        dialog = IdListInputDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            sentence_ids = dialog.get_ids()
+            if not sentence_ids:
+                return
+            self.fetch_datasets_by_ids(sentence_ids)
+        else:
+            if not self.current_dataset:
+                self.status_label.setText(
+                    "Please click 'Fetch New Range' or 'Fetch by ID List' to select videos."
+                )
+
+    def fetch_datasets_by_ids(self, sentence_ids):
+        self.last_query_key = ("ids", self.target_person_id, tuple(sentence_ids))
+        if self.last_query_key in self.dataset_cache:
+            self.on_fetch_success(
+                self.dataset_cache[self.last_query_key], from_cache=True
+            )
+            return
+
+        self.set_buttons_enabled(False)
+        ids_preview = ", ".join(str(i) for i in sentence_ids[:5])
+        if len(sentence_ids) > 5:
+            ids_preview += f", ... (+{len(sentence_ids) - 5} more)"
+        self.status_label.setText(
+            f"Fetching Person {self.target_person_id} videos for IDs [{ids_preview}] from server..."
+        )
+
+        self.fetch_worker = FetchListWorker(
+            self.ssh_manager,
+            person_id=self.target_person_id,
+            sentence_ids=sentence_ids,
+        )
+        self.fetch_worker.finished.connect(self.on_fetch_success)
+        self.fetch_worker.error.connect(self.on_fetch_error)
+        self.fetch_worker.start()
+
     def browse_remote(self):
         range_dialog = RangeInputDialog(self)
         if range_dialog.exec() == QDialog.DialogCode.Accepted:
+            id_list = range_dialog.get_id_list()
+            if id_list:
+                self.fetch_datasets_by_ids(id_list)
+                return
             min_id, max_id = range_dialog.get_range()
         else:
             if not self.current_dataset:
                 self.status_label.setText(
-                    "Please click 'Fetch New Range' to select videos."
+                    "Please click 'Fetch New Range' or 'Fetch by ID List' to select videos."
                 )
             return
 
-        self.last_query_key = (self.target_person_id, min_id, max_id)
+        self.last_query_key = ("range", self.target_person_id, min_id, max_id)
         if self.last_query_key in self.dataset_cache:
             self.on_fetch_success(
                 self.dataset_cache[self.last_query_key], from_cache=True
@@ -870,6 +1038,10 @@ class MainWindow(QMainWindow):
         self.play_btn.setText("▶ Play")
         self.step_back_btn.setEnabled(True)
         self.step_fwd_btn.setEnabled(True)
+        self.loop_btn.setEnabled(True)
+        if hasattr(self, "loop_badge") and self.is_looping:
+            self.loop_badge.show()
+            self._position_loop_badge()
 
         sentence_str = self.current_dataset.get("sentence", "")
         if sentence_str:
@@ -987,6 +1159,8 @@ class MainWindow(QMainWindow):
 
             if self.next_gloss_overlay.isVisible():
                 self._position_next_gloss_overlay()
+            if hasattr(self, "loop_badge") and self.loop_badge.isVisible():
+                self.loop_badge.raise_()
 
             fps = self.video_backend.fps if self.video_backend.fps > 0 else 25.0
             total_sec = self.video_backend.total_frames / fps
@@ -1231,6 +1405,8 @@ class MainWindow(QMainWindow):
         self._action_preview_json.setEnabled(has_data)
         self._action_edit_list.setEnabled(has_data and bool(self.word_pool))
         self._action_reset.setEnabled(has_data)
+        if hasattr(self, "_action_toggle_loop"):
+            self._action_toggle_loop.setEnabled(has_data)
 
     def preview_json(self):
         if not self.annotation_data:
@@ -1850,6 +2026,11 @@ class MainWindow(QMainWindow):
         elif event.key() == Qt.Key.Key_Right:
             self.step_frame(1)
             event.accept()
+        elif event.key() == Qt.Key.Key_L:
+            if not self.user_id_input.hasFocus():
+                self.set_looping(not self.is_looping)
+                event.accept()
+                return
         elif self.annotation_container.isVisible():
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.record_timestamp()
@@ -1866,6 +2047,8 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if self.next_gloss_overlay.isVisible():
             self._position_next_gloss_overlay()
+        if hasattr(self, "loop_badge") and self.loop_badge.isVisible():
+            self._position_loop_badge()
 
     def open_camera_recorder(self):
         if not self.current_dataset:
@@ -2050,6 +2233,10 @@ class MainWindow(QMainWindow):
         self.play_btn.setText("▶ Play")
         self.step_back_btn.setEnabled(True)
         self.step_fwd_btn.setEnabled(True)
+        self.loop_btn.setEnabled(True)
+        if hasattr(self, "loop_badge") and self.is_looping:
+            self.loop_badge.show()
+            self._position_loop_badge()
 
         self.show_frame(0)
 

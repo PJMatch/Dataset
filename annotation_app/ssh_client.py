@@ -22,6 +22,7 @@ class SSHManager:
         target_person_id=6,
         min_id=None,
         max_id=None,
+        sentence_ids=None,
     ):
         datasets = []
         try:
@@ -36,6 +37,7 @@ class SSHManager:
             else "*.mp4"
         )
         mp4_files = [f for f in files if fnmatch.fnmatch(f, pattern)]
+        sentence_ids_set = set(sentence_ids) if sentence_ids is not None else None
 
         for mp4 in mp4_files:
             try:
@@ -51,6 +53,8 @@ class SSHManager:
             if min_id is not None and sentence_id < min_id:
                 continue
             if max_id is not None and sentence_id > max_id:
+                continue
+            if sentence_ids_set is not None and sentence_id not in sentence_ids_set:
                 continue
 
             base_name = mp4[:-4]
@@ -94,7 +98,18 @@ class SSHManager:
                     }
                 )
 
-        datasets.sort(key=lambda x: (x["annotated"], x["sentence_id"], x["person_id"]))
+        if sentence_ids:
+            order_map = {sid: idx for idx, sid in enumerate(sentence_ids)}
+            datasets.sort(
+                key=lambda x: (
+                    x["annotated"],
+                    order_map.get(x["sentence_id"], 999999),
+                    x["sentence_id"],
+                    x["person_id"],
+                )
+            )
+        else:
+            datasets.sort(key=lambda x: (x["annotated"], x["sentence_id"], x["person_id"]))
         return datasets
 
     def read_json_memory(self, remote_path):
