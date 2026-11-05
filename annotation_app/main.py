@@ -1,13 +1,23 @@
 import atexit
 import sys
 
+import pandas as pd
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from gui import MainWindow
 from remote_dialogs import LoginDialog
 from ssh_client import SSHManager
 
+
+def read_words():
+    data = pd.read_excel("../Sentences/word_pool.xlsx")
+    all_words = data.stack()
+
+    all_words.to_csv("word_pool.csv", index=False, header=False)
+
+
 if __name__ == "__main__":
+    read_words()
     app = QApplication(sys.argv)
 
     login = LoginDialog()
