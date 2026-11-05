@@ -1,6 +1,8 @@
 from PyQt6.QtCore import Qt
+import re
 from PyQt6.QtWidgets import (
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -49,15 +51,17 @@ class RangeInputDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Filter by Sentence ID (Person 6)")
+        self.resize(380, 240)
         layout = QVBoxLayout(self)
 
         layout.addWidget(
             QLabel(
-                "Filter Person 6 files by Sentence ID.\nLeave blank to load all files."
+                "Filter Person 6 files by Sentence ID range or enter a list of IDs.\nLeave blank to load all files."
             )
         )
 
-        row = QHBoxLayout()
+        range_group = QGroupBox("Range (From / To)")
+        row = QHBoxLayout(range_group)
         self.min_input = QLineEdit()
         self.min_input.setPlaceholderText("Min ID")
         row.addWidget(QLabel("From:"))
@@ -67,8 +71,14 @@ class RangeInputDialog(QDialog):
         self.max_input.setPlaceholderText("Max ID")
         row.addWidget(QLabel("To:"))
         row.addWidget(self.max_input)
+        layout.addWidget(range_group)
 
-        layout.addLayout(row)
+        list_group = QGroupBox("Or Specific ID List (comma-separated)")
+        list_layout = QVBoxLayout(list_group)
+        self.id_list_input = QLineEdit()
+        self.id_list_input.setPlaceholderText("e.g. 279, 285, 423, 455, 239")
+        list_layout.addWidget(self.id_list_input)
+        layout.addWidget(list_group)
 
         self.btn = QPushButton("Continue")
         self.btn.clicked.connect(self.accept)
@@ -82,6 +92,76 @@ class RangeInputDialog(QDialog):
         max_id = int(max_val) if max_val.isdigit() else None
 
         return min_id, max_id
+
+    def get_id_list(self):
+        text = self.id_list_input.text().strip()
+        if not text:
+            return []
+        tokens = re.split(r"[,;\s]+", text)
+        ids = []
+        for t in tokens:
+            t = t.strip()
+            if t.isdigit():
+                val = int(t)
+                if val not in ids:
+                    ids.append(val)
+        return ids
+
+
+class IdListInputDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Filter by Sentence ID List (Person 6)")
+        self.resize(450, 160)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(
+            QLabel(
+                "Enter sentence IDs separated by commas:\n(e.g. 279, 285, 423, 455, 239)"
+            )
+        )
+
+        self.id_list_input = QLineEdit()
+        self.id_list_input.setPlaceholderText("279, 285, 423, 455, 239")
+        layout.addWidget(self.id_list_input)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(cancel_btn)
+
+        self.btn = QPushButton("Continue")
+        self.btn.setDefault(True)
+        self.btn.clicked.connect(self._on_continue)
+        btn_box.addWidget(self.btn)
+
+        layout.addLayout(btn_box)
+
+    def _on_continue(self):
+        ids = self.get_ids()
+        if not ids:
+            QMessageBox.warning(
+                self,
+                "Invalid Input",
+                "Please enter at least one valid numeric sentence ID (e.g. 279, 285).",
+            )
+            return
+        self.accept()
+
+    def get_ids(self):
+        text = self.id_list_input.text().strip()
+        if not text:
+            return []
+        tokens = re.split(r"[,;\s]+", text)
+        ids = []
+        for t in tokens:
+            t = t.strip()
+            if t.isdigit():
+                val = int(t)
+                if val not in ids:
+                    ids.append(val)
+        return ids
 
 
 class FileBrowserDialog(QDialog):
