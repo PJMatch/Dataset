@@ -1,3 +1,4 @@
+import fnmatch
 import json
 import os
 import tempfile
@@ -15,18 +16,30 @@ class SSHManager:
         self.ssh.connect(host, port=22, username=username, password=password)
         self.sftp = self.ssh.open_sftp()
 
-    def list_datasets(self, remote_dir="/pjm/baza_wideo", min_id=None, max_id=None):
+    def list_datasets(
+        self,
+        remote_dir="/pjm/baza_wideo",
+        target_person_id=6,
+        min_id=None,
+        max_id=None,
+    ):
         datasets = []
         try:
             files = self.sftp.listdir(remote_dir)
         except IOError:
             raise Exception(f"Could not read directory {remote_dir}. Does it exist?")
 
-        mp4_files = [f for f in files if f.endswith(".mp4")]
+        files_set = set(files)
+        pattern = (
+            f"{target_person_id}_*.mp4"
+            if target_person_id is not None
+            else "*.mp4"
+        )
+        mp4_files = [f for f in files if fnmatch.fnmatch(f, pattern)]
 
         for mp4 in mp4_files:
             try:
-                parts = mp4.split("_")
+                parts = mp4[:-4].split("_")
                 if len(parts) >= 2:
                     person_id = int(parts[0])
                     sentence_id = int(parts[1])
@@ -43,9 +56,10 @@ class SSHManager:
             base_name = mp4[:-4]
             json_name = base_name + ".json"
 
-            if json_name in files:
+            if json_name in files_set:
                 is_annotated = False
                 skip_file = False
+                sentence_text = ""
                 json_path = f"{remote_dir}/{json_name}"
 
                 try:
@@ -59,6 +73,8 @@ class SSHManager:
                             data["glosses"][0], list
                         ):
                             is_annotated = True
+
+                        sentence_text = data.get("sentence", "").strip()
                 except Exception:
                     print("Flag recorded_correctly not found")
                     pass
@@ -69,6 +85,7 @@ class SSHManager:
                 datasets.append(
                     {
                         "name": base_name,
+                        "sentence": sentence_text or base_name,
                         "annotated": is_annotated,
                         "mp4_path": f"{remote_dir}/{mp4}",
                         "json_path": json_path,
